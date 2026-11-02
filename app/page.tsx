@@ -37,6 +37,19 @@ import type {
   Transcript,
 } from "../lib/types";
 import { getDemo } from "../lib/demo";
+import { ProductLibrary, NoteLibrary } from "../components/asset-libraries";
+import {
+  listImages,
+  putImage,
+  deleteImage,
+  listNotes,
+  putNote,
+  deleteNote,
+  imageId,
+  noteId,
+  type LibraryImage,
+  type LibraryNote,
+} from "../lib/library";
 type ApiResult = {
   items?: ContentItem[];
   warnings?: string[];
@@ -119,7 +132,17 @@ export default function Home() {
     [lightbox, setLightbox] = useState<{
       images: string[];
       index: number;
+      source: ContentItem;
     } | null>(null);
+  const [productImages, setProductImages] = useState<LibraryImage[]>([]);
+  const [noteMaterials, setNoteMaterials] = useState<LibraryNote[]>([]);
+  const [libraryTab, setLibraryTab] = useState<"notes" | "saved">("notes");
+  const [libraryReady, setLibraryReady] = useState(false);
+  const [libraryError, setLibraryError] = useState("");
+  const [savingImage, setSavingImage] = useState<string | null>(null);
+  const [savingNotes, setSavingNotes] = useState<string[]>([]);
+  const imageSaveLock = useRef(false);
+  const noteSaveLocks = useRef(new Set<string>());
   const [saved, setSaved] = useState<Record<string, ContentItem>>({}),
     [filter, setFilter] = useState<"all" | "saved">("all"),
     [recent, setRecent] = useState<string[]>([]),
@@ -147,6 +170,26 @@ export default function Home() {
         x.transcript?.status === "pending" ||
         x.transcript?.status === "running",
     ).length;
+  useEffect(() => {
+    let disposed = false;
+    Promise.all([listImages(), listNotes()])
+      .then(([images, notes]) => {
+        if (!disposed) {
+          setProductImages(images);
+          setNoteMaterials(notes);
+          setLibraryReady(true);
+        }
+      })
+      .catch(() => {
+        if (!disposed)
+          setLibraryError(
+            "无法打开本地资料库，请检查浏览器存储权限后刷新页面。",
+          );
+      });
+    return () => {
+      disposed = true;
+    };
+  }, []);
   useEffect(() => {
     try {
       const stored = JSON.parse(localStorage.getItem("linggan.saved") || "{}");
@@ -262,6 +305,127 @@ export default function Home() {
   function navigate(next: string) {
     setPage(next);
     setMobileMenu(false);
+    window.scrollTo({ top: 0, behavior: "instant" });
+  }
+  async function saveNoteContent(item: ContentItem) {
+    const id = noteId(item);
+    if (
+      !libraryReady ||
+      noteSaveLocks.current.has(id) ||
+      noteMaterials.some((note) => note.id === id)
+    )
+      return;
+    if (!item.content.trim()) {
+      setToast("平台未提供正文，暂时无法保存。");
+      return;
+    }
+    noteSaveLocks.current.add(id);
+    setSavingNotes((old) => [...old, id]);
+    const record: LibraryNote = {
+      id,
+      sourceId: item.id,
+      platform: item.platform,
+      title: item.title,
+      author: item.author,
+      sourceUrl: item.url,
+      content: item.content,
+      createdAt: new Date().toISOString(),
+      demo: !!item.demo,
+    };
+    try {
+      await putNote(record);
+      setNoteMaterials((old) => [
+        record,
+        ...old.filter((note) => note.id !== id),
+      ]);
+      setToast("笔记内容已存入素材库");
+    } catch {
+      setToast("保存失败：请检查浏览器存储权限或剩余空间。");
+    } finally {
+      noteSaveLocks.current.delete(id);
+      setSavingNotes((old) => old.filter((value) => value !== id));
+    }
+  }
+  async function saveCurrentImage() {
+    if (!lightbox || !libraryReady || imageSaveLock.current) return;
+    const { source, index, images } = lightbox;
+    const id = imageId(source, index);
+    if (productImages.some((image) => image.id === id)) return;
+    imageSaveLock.current = true;
+    setSavingImage(id);
+    try {
+      const originalUrl = images[index];
+      let blob: Blob;
+      if (
+        source.demo &&
+        originalUrl.startsWith("data:image/svg+xml;charset=utf-8,")
+      ) {
+        blob = new Blob(
+          [decodeURIComponent(originalUrl.split(",").slice(1).join(","))],
+          { type: "image/svg+xml" },
+        );
+      } else {
+        const response = await fetch("/api/images/import", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ url: originalUrl }),
+          signal: AbortSignal.timeout(30000),
+        });
+        if (!response.ok) {
+          const result = (await response.json().catch(() => null)) as {
+            error?: string;
+          } | null;
+          throw new Error(result?.error || "图片获取失败，请重新采集后再试。");
+        }
+        blob = await response.blob();
+      }
+      const record: LibraryImage = {
+        id,
+        sourceId: source.id,
+        platform: source.platform,
+        title: source.title,
+        author: source.author,
+        sourceUrl: source.url,
+        originalUrl,
+        imageIndex: index,
+        blob,
+        createdAt: new Date().toISOString(),
+        demo: !!source.demo,
+      };
+      await putImage(record);
+      setProductImages((old) => [
+        record,
+        ...old.filter((image) => image.id !== id),
+      ]);
+      setToast(`第 ${index + 1} 张图片已存入产品资料库`);
+    } catch (error) {
+      setToast(
+        `保存失败：${error instanceof Error ? error.message : "请检查浏览器存储空间后重试。"}`,
+      );
+    } finally {
+      imageSaveLock.current = false;
+      setSavingImage(null);
+    }
+  }
+  async function removeProductImage(id: string) {
+    try {
+      await deleteImage(id);
+      setProductImages((old) => old.filter((image) => image.id !== id));
+      setToast("已从产品资料库移除图片");
+    } catch {
+      setToast("移除失败，请稍后再试。");
+      throw new Error("移除失败");
+    }
+  }
+  async function removeNoteMaterial(id: string) {
+    try {
+      await deleteNote(id);
+      setNoteMaterials((old) => old.filter((note) => note.id !== id));
+      setToast("已从素材库移除笔记内容");
+    } catch {
+      setToast("移除失败，请稍后再试。");
+      throw new Error("移除失败");
+    }
   }
   function saveItem(item: ContentItem) {
     const next = { ...savedRef.current };
@@ -639,7 +803,9 @@ export default function Home() {
           <div className="card-actions">
             {item.platform === "xiaohongshu" && (
               <button
-                onClick={() => setLightbox({ images: item.images, index: 0 })}
+                onClick={() =>
+                  setLightbox({ images: item.images, index: 0, source: item })
+                }
                 disabled={!item.images.length}
               >
                 <ImageIcon size={13} />
@@ -649,6 +815,26 @@ export default function Home() {
             <button onClick={() => setSelectedId(item.id)}>
               查看详情
               <ChevronRight size={13} />
+            </button>
+            <button
+              onClick={() => saveNoteContent(item)}
+              disabled={
+                !libraryReady ||
+                !item.content.trim() ||
+                savingNotes.includes(noteId(item)) ||
+                noteMaterials.some((note) => note.id === noteId(item))
+              }
+            >
+              {savingNotes.includes(noteId(item)) ? (
+                <LoaderCircle size={13} className="spin" />
+              ) : (
+                <FileText size={13} />
+              )}
+              {noteMaterials.some((note) => note.id === noteId(item))
+                ? "已存入素材库"
+                : savingNotes.includes(noteId(item))
+                  ? "正在保存"
+                  : "存入素材库"}
             </button>
             {safeUrl(item.url) && !item.demo && (
               <a
@@ -773,6 +959,11 @@ export default function Home() {
           </div>
         </header>
         <main>
+          {libraryError && (
+            <div className="notice error-notice" role="alert">
+              {libraryError}
+            </div>
+          )}
           {page === "创作中心" ? (
             <>
               <section className="page-heading">
@@ -1246,6 +1437,22 @@ export default function Home() {
                 </aside>
               </div>
             </>
+          ) : page === "产品资料库" ? (
+            !libraryReady ? (
+              <div className="empty-state full-empty">
+                <Boxes size={36} />
+                <h3>
+                  {libraryError ? "资料库暂时无法打开" : "正在打开产品资料库…"}
+                </h3>
+                <p>{libraryError || "正在读取已保存的图片。"}</p>
+              </div>
+            ) : (
+              <ProductLibrary
+                images={productImages}
+                onRemove={removeProductImage}
+                onDiscover={() => navigate("创作中心")}
+              />
+            )
           ) : page === "素材库" ? (
             <>
               <section className="page-heading">
@@ -1253,7 +1460,8 @@ export default function Home() {
                   <div className="eyebrow">YOUR INSPIRATION LIBRARY</div>
                   <h1>把喜欢的灵感，留在这里</h1>
                   <p>
-                    已收藏 {Object.keys(saved).length} 条素材 · 保存在当前浏览器
+                    笔记内容 {noteMaterials.length} 条 · 作品收藏{" "}
+                    {Object.keys(saved).length} 条 · 保存在当前浏览器
                   </p>
                 </div>
                 <button
@@ -1264,24 +1472,66 @@ export default function Home() {
                   发现新灵感
                 </button>
               </section>
-              <div className="library-list">
-                {Object.values(saved).length ? (
-                  Object.values(saved).map(card)
-                ) : (
-                  <div className="empty-state full-empty">
-                    <FolderOpen size={40} />
-                    <h3>你的灵感库，等待第一份收藏</h3>
-                    <p>在创作中心点击收藏，即可将作品保存在这里。</p>
-                    <button
-                      className="collect-button"
-                      onClick={() => navigate("创作中心")}
-                    >
-                      去发现灵感
-                      <ArrowRight size={15} />
-                    </button>
-                  </div>
-                )}
+              <div
+                className="result-tabs library-category-tabs"
+                role="tablist"
+                aria-label="素材类型"
+              >
+                <button
+                  role="tab"
+                  aria-selected={libraryTab === "notes"}
+                  className={libraryTab === "notes" ? "active" : ""}
+                  onClick={() => setLibraryTab("notes")}
+                >
+                  笔记内容 <span>{noteMaterials.length}</span>
+                </button>
+                <button
+                  role="tab"
+                  aria-selected={libraryTab === "saved"}
+                  className={libraryTab === "saved" ? "active" : ""}
+                  onClick={() => setLibraryTab("saved")}
+                >
+                  作品收藏 <span>{Object.keys(saved).length}</span>
+                </button>
               </div>
+              {libraryTab === "notes" ? (
+                !libraryReady ? (
+                  <div className="empty-state">
+                    <FileText size={30} />
+                    <h3>
+                      {libraryError
+                        ? "素材库暂时无法打开"
+                        : "正在读取笔记内容…"}
+                    </h3>
+                  </div>
+                ) : (
+                  <NoteLibrary
+                    notes={noteMaterials}
+                    onRemove={removeNoteMaterial}
+                    onCopy={copyText}
+                    onDiscover={() => navigate("创作中心")}
+                  />
+                )
+              ) : (
+                <div className="library-list">
+                  {Object.values(saved).length ? (
+                    Object.values(saved).map(card)
+                  ) : (
+                    <div className="empty-state full-empty">
+                      <FolderOpen size={40} />
+                      <h3>你的灵感库，等待第一份收藏</h3>
+                      <p>在创作中心点击收藏，即可将作品保存在这里。</p>
+                      <button
+                        className="collect-button"
+                        onClick={() => navigate("创作中心")}
+                      >
+                        去发现灵感
+                        <ArrowRight size={15} />
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
             </>
           ) : page === "AI智能服务" ? (
             <>
@@ -1475,13 +1725,32 @@ export default function Home() {
                     ? "笔记正文"
                     : "作品文案"}
                 </h3>
-                <button
-                  className="text-button"
-                  onClick={() => copyText(selected.content)}
-                >
-                  <Copy size={13} />
-                  复制文案
-                </button>
+                <div className="detail-note-actions">
+                  <button
+                    className="text-button"
+                    disabled={
+                      !libraryReady ||
+                      !selected.content.trim() ||
+                      savingNotes.includes(noteId(selected)) ||
+                      noteMaterials.some((note) => note.id === noteId(selected))
+                    }
+                    onClick={() => saveNoteContent(selected)}
+                  >
+                    <FileText size={13} />
+                    {noteMaterials.some((note) => note.id === noteId(selected))
+                      ? "已存入素材库"
+                      : savingNotes.includes(noteId(selected))
+                        ? "正在保存…"
+                        : "存入素材库"}
+                  </button>
+                  <button
+                    className="text-button"
+                    onClick={() => copyText(selected.content)}
+                  >
+                    <Copy size={13} />
+                    复制文案
+                  </button>
+                </div>
               </div>
               <p className="full-content">
                 {selected.content || "平台未返回正文内容。"}
@@ -1498,7 +1767,11 @@ export default function Home() {
                       <button
                         key={`${url}-${i}`}
                         onClick={() =>
-                          setLightbox({ images: selected.images, index: i })
+                          setLightbox({
+                            images: selected.images,
+                            index: i,
+                            source: selected,
+                          })
                         }
                       >
                         <img
@@ -1584,6 +1857,57 @@ export default function Home() {
             <figcaption>
               {lightbox.index + 1} / {lightbox.images.length}
             </figcaption>
+            <div className="gallery-save-panel">
+              <p>{lightbox.source.title}</p>
+              <div className="gallery-save-actions">
+                <button
+                  className="collect-button"
+                  disabled={
+                    !libraryReady ||
+                    !!savingImage ||
+                    productImages.some(
+                      (image) =>
+                        image.id === imageId(lightbox.source, lightbox.index),
+                    )
+                  }
+                  onClick={saveCurrentImage}
+                >
+                  {savingImage ? (
+                    <LoaderCircle size={16} className="spin" />
+                  ) : productImages.some(
+                      (image) =>
+                        image.id === imageId(lightbox.source, lightbox.index),
+                    ) ? (
+                    <CheckCircle2 size={16} />
+                  ) : (
+                    <Boxes size={16} />
+                  )}
+                  {productImages.some(
+                    (image) =>
+                      image.id === imageId(lightbox.source, lightbox.index),
+                  )
+                    ? "已存入产品资料库"
+                    : savingImage
+                      ? "正在存入…"
+                      : "存入产品资料库"}
+                </button>
+                <button
+                  className="gallery-library-link"
+                  onClick={() => {
+                    setLightbox(null);
+                    setSelectedId(null);
+                    navigate("产品资料库");
+                  }}
+                >
+                  查看产品资料库
+                  <ArrowRight size={14} />
+                </button>
+              </div>
+              <small>
+                仅保存当前图片 · 保存在当前浏览器
+                {lightbox.source.demo ? " · 演示图片" : ""}
+              </small>
+            </div>
           </figure>
           <button
             className="lightbox-arrow"
@@ -1599,7 +1923,11 @@ export default function Home() {
       )}
       {toast && (
         <div className="toast" role="status">
-          <CheckCircle2 size={16} />
+          {toast.includes("失败") || toast.includes("无法") ? (
+            <CircleHelp size={16} />
+          ) : (
+            <CheckCircle2 size={16} />
+          )}
           {toast}
         </div>
       )}
