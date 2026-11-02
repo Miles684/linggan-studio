@@ -1,0 +1,21 @@
+{
+  "_source": "https://help.aliyun.com/en/model-studio/paraformer-recorded-speech-recognition-restful-api",
+  "_note": "Official success-response field layout and OSS hostname. Task IDs and signing values are nonworking fixtures; no credentials are present.",
+  "request_id": "f9e1afad-94d3-997e-a83b-fixture-only",
+  "output": {
+    "task_id": "f86ec806-4d73-485f-a24f-fixture-only",
+    "task_status": "SUCCEEDED",
+    "submit_time": "2024-09-12 15:11:40.041",
+    "scheduled_time": "2024-09-12 15:11:40.071",
+    "end_time": "2024-09-12 15:11:40.903",
+    "results": [
+      {
+        "file_url": "https://v3.douyinvod.com/fixture.mp4",
+        "transcription_url": "https://dashscope-result-bj.oss-cn-beijing.aliyuncs.com/pre/filetrans-16k/20240912/15%3A11/fixture-only.json?Expires=1726211500&OSSAccessKeyId=YOUR_ACCESS_KEY_ID&Signature=YOUR_SIGNATURE",
+        "subtask_status": "SUCCEEDED"
+      }
+    ],
+    "task_metrics": { "TOTAL": 1, "SUCCEEDED": 1, "FAILED": 0 }
+  },
+  "usage": { "duration": 9 }
+}

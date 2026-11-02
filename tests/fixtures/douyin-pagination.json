@@ -1,0 +1,20 @@
+{
+  "_note": "Synthetic metadata fixture preserving the business_config shape observed in TikHub Douyin V2. Contains no real post, author, or credentials.",
+  "code": 200,
+  "data": {
+    "business_data": [],
+    "business_config": {
+      "has_more": 1,
+      "next_page": {
+        "keyword": "fixture",
+        "search_request_id": "fixture-request",
+        "search_id": "fixture-search-next",
+        "cursor": 8,
+        "poi_search_info": ""
+      },
+      "backtrace": "fixture-backtrace",
+      "card_count": 8
+    },
+    "log": { "search_id": "fixture-search-log" }
+  }
+}
