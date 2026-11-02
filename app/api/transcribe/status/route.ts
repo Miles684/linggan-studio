@@ -8,6 +8,8 @@ export async function POST(request: Request) {
       await pollTranscription(
         body.taskId,
         resolveKey(body.credentials, "dashscope"),
+        fetch,
+        () => resolveKey(body.credentials, "qwen"),
       ),
     );
   } catch (error) {

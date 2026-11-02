@@ -1,8 +1,14 @@
 import { env } from "cloudflare:workers";
+import type { Credentials } from "../types";
 import { ServiceError } from "./services";
 
-type Credentials = { tikhubKey?: string; dashscopeKey?: string };
-type Environment = { TIKHUB_API_KEY?: string; DASHSCOPE_API_KEY?: string };
+const services = {
+  tikhub: { field: "tikhubKey", env: "TIKHUB_API_KEY", label: "TikHub" },
+  dashscope: { field: "dashscopeKey", env: "DASHSCOPE_API_KEY", label: "阿里云百炼（北京地域）" },
+  qwen: { field: "qwenKey", env: "QWEN_API_KEY", label: "通义千问（北京地域）" },
+} as const;
+type Service = keyof typeof services;
+type Environment = Partial<Record<(typeof services)[Service]["env"], string>>;
 
 function serverKey(name: keyof Environment): string {
   const worker = env as unknown as Environment;
@@ -13,22 +19,13 @@ export function configuration() {
   return {
     tikhubConfigured: !!serverKey("TIKHUB_API_KEY"),
     dashscopeConfigured: !!serverKey("DASHSCOPE_API_KEY"),
+    qwenConfigured: !!serverKey("QWEN_API_KEY"),
   };
 }
 
-export function resolveKey(
-  credentials: unknown,
-  kind: "tikhub" | "dashscope",
-): string {
-  if (
-    credentials !== undefined &&
-    (!credentials ||
-      typeof credentials !== "object" ||
-      Array.isArray(credentials))
-  )
-    throw new ServiceError("接口配置格式无效。", 400, "INVALID_INPUT");
-  const name = kind === "tikhub" ? "tikhubKey" : "dashscopeKey";
-  const supplied = (credentials as Credentials | undefined)?.[name];
+function configuredKey(credentials: Credentials | undefined, kind: Service) {
+  const { field, env } = services[kind];
+  const supplied = credentials?.[field];
   if (
     supplied !== undefined &&
     (typeof supplied !== "string" ||
@@ -36,12 +33,21 @@ export function resolveKey(
       /[\r\n]/.test(supplied))
   )
     throw new ServiceError("密钥格式无效。", 400, "INVALID_INPUT");
-  const key =
-    supplied?.trim() ||
-    serverKey(kind === "tikhub" ? "TIKHUB_API_KEY" : "DASHSCOPE_API_KEY");
+  return supplied?.trim() || serverKey(env);
+}
+
+export function resolveKey(credentials: unknown, kind: Service): string {
+  if (
+    credentials !== undefined &&
+    (!credentials || typeof credentials !== "object" || Array.isArray(credentials))
+  )
+    throw new ServiceError("接口配置格式无效。", 400, "INVALID_INPUT");
+  const supplied = credentials as Credentials | undefined;
+  const key = configuredKey(supplied, kind) ||
+    (kind === "qwen" && configuredKey(supplied, "dashscope"));
   if (!key)
     throw new ServiceError(
-      `请先在设置中配置 ${kind === "tikhub" ? "TikHub" : "阿里云百炼（北京地域）"} API Key。`,
+      `请先在设置中配置 ${services[kind].label} API Key。`,
       400,
       "MISSING_CREDENTIALS",
     );

@@ -18,7 +18,6 @@ import {
   Plus,
   RefreshCw,
   Save,
-  Settings2,
   Sparkles,
   Trash2,
   Upload,
@@ -26,20 +25,24 @@ import {
   X,
 } from "lucide-react";
 import type { ContentItem, Credentials } from "../lib/types";
-import type { LibraryImage } from "../lib/library";
+import { readWorkImage, type LibraryImage, type WorkDraft } from "../lib/library";
+import { optimizedImageSize, type ImageResolution } from "../lib/image-size";
+import { countCharacters, noteFormatError } from "../lib/note-format";
 import "./creation-studio.css";
 
 export type CreationStudioProps = {
   sources: ContentItem[];
   productImages: LibraryImage[];
+  savedWorks: ContentItem[];
   credentials: Credentials;
   configured: boolean;
   onCopy: (text: string) => Promise<void> | void;
   onSaveImage: (blob: Blob, title: string) => Promise<void>;
-  onSaveNote: (note: { title: string; content: string }) => Promise<void>;
+  creatorName: string;
+  onCreatorNameChange?: (value: string) => void;
+  onSaveNote: (draft: WorkDraft) => Promise<void>;
   initialSource?: ContentItem | null;
   launchId?: number;
-  onSettings: () => void;
 };
 
 type ReferenceImage = {
@@ -49,6 +52,8 @@ type ReferenceImage = {
   bytes: number;
   width: number;
   height: number;
+  originalWidth: number;
+  originalHeight: number;
 };
 type ImageTask = { taskId: string; model: string; createdAt: number };
 type ImageResult = { images: string[]; model: string };
@@ -66,9 +71,16 @@ type CopyResult = {
   model: string;
   warnings?: string[];
 };
+type CopyBrief = {
+  mode: "idea" | "rewrite";
+  idea?: string;
+  source?: Pick<ContentItem, "id" | "title" | "content" | "url">;
+  requirements: string;
+  experience: string;
+};
 type ImageStatus =
   "idle" | "submitting" | "pending" | "running" | "paused" | "done" | "error";
-type ImageMode = "text" | "reference";
+type ImageMode = "optimize" | "reference";
 const TASK_STORAGE = "linggan.creation.image.v1";
 const TASK_EVENT = "linggan-image-task-changed";
 const MAX_FILE_BYTES = 1.5 * 1024 * 1024;
@@ -131,8 +143,15 @@ function canvasBlob(canvas: HTMLCanvasElement, quality: number): Promise<Blob> {
     ),
   );
 }
-async function prepareImage(blob: Blob, name: string): Promise<ReferenceImage> {
-  if (!IMAGE_TYPES.includes(blob.type.split(";")[0]))
+async function prepareImage(
+  blob: Blob,
+  name: string,
+  mode: ImageMode,
+  fromSavedWork: boolean,
+): Promise<ReferenceImage> {
+  const mime = blob.type.split(";")[0];
+  const rasterize = fromSavedWork && ["image/svg+xml", "image/gif", "image/avif"].includes(mime);
+  if (!IMAGE_TYPES.includes(mime) && !rasterize)
     throw new Error(
       "请选择 JPG、PNG 或 WebP 图片。资料库中的其他格式暂不支持作为参考图。",
     );
@@ -158,11 +177,12 @@ async function prepareImage(blob: Blob, name: string): Promise<ReferenceImage> {
       img.naturalWidth * img.naturalHeight > 80_000_000
     )
       throw new Error("图片尺寸过大或无法识别，请缩小原图后再试。");
-    if (
+    const aspect =
       Math.max(img.naturalWidth, img.naturalHeight) /
-        Math.min(img.naturalWidth, img.naturalHeight) >
-      10
-    )
+      Math.min(img.naturalWidth, img.naturalHeight);
+    if (mode === "optimize" && aspect > 8)
+      throw new Error("图片优化支持长短边比例不超过 8:1 的效果图，请裁剪后上传。");
+    if (aspect > 10)
       throw new Error(
         "参考图的长短边比例不能超过 10:1，请裁剪图片后重新选择。",
       );
@@ -198,6 +218,8 @@ async function prepareImage(blob: Blob, name: string): Promise<ReferenceImage> {
       bytes: output.size,
       width: canvas.width,
       height: canvas.height,
+      originalWidth: img.naturalWidth,
+      originalHeight: img.naturalHeight,
     };
   } catch (error) {
     throw new Error(message(error, "图片无法读取，请确认文件未损坏。"));
@@ -319,36 +341,47 @@ function Modal({
     </dialog>
   );
 }
+type PickerImage = Pick<LibraryImage, "id" | "title" | "imageIndex" | "demo"> & { image: Blob | string };
+
+function PickerPicture({ image, alt = "" }: { image: Blob | string; alt?: string }) {
+  const [url, setUrl] = useState("");
+  useEffect(() => {
+    if (typeof image === "string") return;
+    const next = URL.createObjectURL(image);
+    setUrl(next);
+    return () => URL.revokeObjectURL(next);
+  }, [image]);
+  const src = typeof image === "string" ? image : url;
+  return src ? <img src={src} alt={alt} loading="lazy" referrerPolicy="no-referrer" /> : null;
+}
+
 function LibraryThumbnail({
   item,
   onSelect,
+  order,
 }: {
-  item: LibraryImage;
+  item: PickerImage;
   onSelect: () => void;
+  order?: number;
 }) {
-  const [url, setUrl] = useState("");
-  useEffect(() => {
-    const next = URL.createObjectURL(item.blob);
-    setUrl(next);
-    return () => URL.revokeObjectURL(next);
-  }, [item.blob]);
-  const supported = IMAGE_TYPES.includes(item.blob.type.split(";")[0]);
+  const supported = order !== undefined || typeof item.image === "string" || IMAGE_TYPES.includes(item.image.type.split(";")[0]);
   return (
     <button
       type="button"
       className="cs-library-item"
       onClick={onSelect}
       disabled={!supported}
+      aria-pressed={order === undefined ? undefined : order > 0}
     >
       <span>
-        {url && <img src={url} alt={item.title} loading="lazy" />}
+        <PickerPicture image={item.image} />
         <span className="cs-library-select">
-          <Plus size={22} />
+          {order ? <Check size={22} /> : <Plus size={22} />}
         </span>
       </span>
       <strong>{item.title || "未命名图片"}</strong>
       <small>
-        {supported
+        {order ? `已选 · 第 ${order} 张` : supported
           ? `原图 ${item.imageIndex + 1}${item.demo ? " · 演示素材" : ""}`
           : "暂不支持此图片格式"}
       </small>
@@ -356,20 +389,90 @@ function LibraryThumbnail({
   );
 }
 
+function NoteImagePicker({
+  generated, products, selected, onChange, disabled,
+}: {
+  generated?: string[];
+  products: LibraryImage[];
+  selected: PickerImage[];
+  onChange: (next: PickerImage[]) => void;
+  disabled: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  function pick(item: PickerImage) {
+    const order = selected.findIndex((entry) => entry.id === item.id) + 1;
+    return (
+      <LibraryThumbnail key={item.id} item={item} order={order} onSelect={() =>
+        onChange(order ? selected.filter((entry) => entry.id !== item.id) : [...selected, item])
+      } />
+    );
+  }
+  return (
+    <div className="cs-work-images">
+      <div className="cs-work-images-heading">
+        <strong>笔记配图 <small>{selected.length ? `已选 ${selected.length} 张` : "选填"}</small></strong>
+        <button type="button" disabled={disabled} onClick={() => setOpen(true)}>
+          <ImageIcon size={15} />选择配图
+        </button>
+      </div>
+      {selected.length > 0 && (
+        <ol aria-label="配图顺序" className="cs-work-image-strip">
+          {selected.map((item, index) => (
+            <li key={item.id}>
+              <PickerPicture image={item.image} alt={item.title} />
+              <span>{index === 0 ? "封面" : index + 1}</span>
+              <button type="button" disabled={disabled} aria-label={`移除第 ${index + 1} 张配图`}
+                onClick={() => onChange(selected.filter((entry) => entry.id !== item.id))}><X size={13} /></button>
+            </li>
+          ))}
+        </ol>
+      )}
+      {open && (
+        <Modal title="选择笔记配图" onClose={() => setOpen(false)}>
+          <p className="cs-library-description">按希望展示的顺序选图，第一张用作封面。再次点击可取消选择。</p>
+          {!!generated?.length && (
+            <>
+              <h4 className="cs-picker-source">当前生成结果</h4>
+              <div className="cs-library-grid">{generated.map((url, index) =>
+                pick({ id: url, image: url, title: `生成图片 ${index + 1}`, imageIndex: index, demo: false })
+              )}</div>
+            </>
+          )}
+          {products.length > 0 && (
+            <>
+              <h4 className="cs-picker-source">产品资料库</h4>
+              <div className="cs-library-grid">{products.map((item) => pick({ ...item, image: item.blob }))}</div>
+            </>
+          )}
+          {!generated?.length && !products.length && (
+            <div className="cs-modal-empty"><ImageIcon size={28} /><p>生成图片或将图片存入产品资料库后，就能在这里选择。</p></div>
+          )}
+          <div className="cs-copy-actions cs-picker-done"><button type="button" onClick={() => setOpen(false)}>完成选择（{selected.length} 张）</button></div>
+        </Modal>
+      )}
+    </div>
+  );
+}
+
 export function CreationStudio({
   sources,
   productImages,
+  savedWorks,
   credentials,
-  configured,
+  configured: ready,
   onCopy,
   onSaveImage,
+  creatorName,
+  onCreatorNameChange,
   onSaveNote,
   initialSource,
   launchId,
-  onSettings,
 }: CreationStudioProps) {
-  const [imageMode, setImageMode] = useState<ImageMode>("text");
+  const [imageMode, setImageMode] = useState<ImageMode>("optimize");
+  const optimizing = imageMode === "optimize";
+  const [productImage, setProductImage] = useState<ReferenceImage | null>(null);
   const [prompt, setPrompt] = useState("");
+  const [resolution, setResolution] = useState<ImageResolution>("1K");
   const [size, setSize] = useState("1024*1024");
   const [references, setReferences] = useState<(ReferenceImage | null)[]>([
     null,
@@ -377,6 +480,17 @@ export function CreationStudio({
   ]);
   const [processingIndex, setProcessingIndex] = useState<number | null>(null);
   const [librarySlot, setLibrarySlot] = useState<number | null>(null);
+  const pickingMaterial = !optimizing && librarySlot !== null && librarySlot > 0;
+  const pickerImages: PickerImage[] = librarySlot === null ? [] : pickingMaterial
+    ? savedWorks.flatMap((work) => {
+        const urls = work.images.length ? work.images : [work.cover];
+        return urls.flatMap((url, index) =>
+          /^https?:\/\//i.test(url) || (work.demo && url.startsWith("data:image/svg+xml;charset=utf-8,"))
+            ? [{ id: `${work.platform}:${work.id}:${index}`, image: url, title: work.title, imageIndex: index, demo: !!work.demo }]
+            : [],
+        );
+      })
+    : productImages.map((item) => ({ ...item, image: item.blob }));
   const [preview, setPreview] = useState<{ url: string; title: string } | null>(
     null,
   );
@@ -397,12 +511,23 @@ export function CreationStudio({
   const [sourceId, setSourceId] = useState("");
   const [requirements, setRequirements] = useState("");
   const [experience, setExperience] = useState("");
-  const [copyBusy, setCopyBusy] = useState(false);
+  const [copyOperation, setCopyOperation] = useState<"generate" | "revise" | null>(null);
+  const copyBusy = copyOperation !== null;
   const [copyError, setCopyError] = useState("");
   const [copyNotice, setCopyNotice] = useState("");
-  const [copyResult, setCopyResult] = useState<CopyResult | null>(null);
+  const [copyResult, setCopyResult] = useState<(CopyResult & { id: string; signedBy?: string }) | null>(null);
+  const [noteImages, setNoteImages] = useState<PickerImage[]>([]);
   const [copyWarnings, setCopyWarnings] = useState<string[]>([]);
   const [tagsText, setTagsText] = useState("");
+  const [feedback, setFeedback] = useState("");
+  const [editingNote, setEditingNote] = useState(false);
+  const copyBrief = useRef<CopyBrief | null>(null);
+  const reviewHeading = useRef<HTMLHeadingElement>(null);
+  const draftTags = tagsText.split(/[#＃\s]+/u).filter(Boolean);
+  const formattedTags = draftTags.map((tag) => `#${tag}`).join(" ");
+  const draftError = copyResult
+    ? noteFormatError(copyResult.title, copyResult.content, draftTags)
+    : "";
   const [noteSaving, setNoteSaving] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
   const fileSlot = useRef(0);
@@ -416,7 +541,6 @@ export function CreationStudio({
   const copyController = useRef<AbortController | null>(null);
   const blobCache = useRef(new Map<string, Blob>());
   const initialApplied = useRef<string | null>(null);
-  const ready = configured || !!credentials.dashscopeKey;
   const selectedCount = references.filter(Boolean).length;
   const imageWorking =
     imageStatus === "submitting" || !!imageTask || !!pendingSubmission;
@@ -513,11 +637,15 @@ export function CreationStudio({
       copyRequestVersion.current++;
       copyController.current?.abort();
       copySubmitLock.current = false;
-      setCopyBusy(false);
+      setCopyOperation(null);
+      copyBrief.current = null;
+      setFeedback("");
+      setEditingNote(false);
       setCopyMode("rewrite");
       setSourceId(initialSource.id);
       setCopyError("");
       setCopyResult(null);
+      setNoteImages([]);
       setTagsText("");
       setCopyNotice("");
       setCopyWarnings([]);
@@ -589,14 +717,14 @@ export function CreationStudio({
     }
     void poll();
     return () => controller.abort();
-  }, [imageTask, pollVersion, paused, ready, credentials.dashscopeKey]);
+  }, [imageTask, pollVersion, paused, ready, credentials]);
 
   function updateReferences(next: (ReferenceImage | null)[]) {
     const normalized = normalizeSlots(next);
     referenceRef.current = normalized;
     setReferences(normalized);
   }
-  async function useImage(blob: Blob, name: string, index: number) {
+  async function useImage(input: Blob | string, name: string, index: number, demo = false) {
     if (processingRef.current || imageWorking) return;
     processingRef.current = true;
     setProcessingIndex(index);
@@ -604,8 +732,14 @@ export function CreationStudio({
     setImageError("");
     setImageNotice("");
     try {
-      const image = await prepareImage(blob, name);
+      const fromSavedWork = typeof input === "string";
+      const blob = fromSavedWork ? await readWorkImage(input, demo) : input;
+      const image = await prepareImage(blob, name, imageMode, fromSavedWork);
       if (!alive.current) return;
+      if (optimizing) {
+        setProductImage(image);
+        return;
+      }
       const next = [...referenceRef.current];
       next[index] = image;
       const bytes = new TextEncoder().encode(
@@ -637,10 +771,14 @@ export function CreationStudio({
     }
   }
   function removeImage(index: number) {
+    setImageError("");
+    if (optimizing) {
+      setProductImage(null);
+      return;
+    }
     const next = [...referenceRef.current];
     next[index] = null;
     updateReferences(next);
-    setImageError("");
   }
   function moveImage(index: number, direction: number) {
     const next = [...referenceRef.current];
@@ -657,16 +795,14 @@ export function CreationStudio({
       window.dispatchEvent(new Event(TASK_EVENT));
       return;
     }
-    if (imageSubmitLock.current || imageWorking || processingRef.current)
+    if (!ready || imageSubmitLock.current || imageWorking || processingRef.current)
       return;
     setImageError("");
     setImageNotice("");
-    if (!ready) {
-      onSettings();
-      return;
-    }
-    if (imageMode === "text" && !prompt.trim()) {
-      setImageError("先描述你想生成的画面，再开始创作。");
+    if (optimizing && (!productImage || !prompt.trim())) {
+      setImageError(
+        !productImage ? "请先上传一张产品效果图。" : "请填写希望如何重绘这张效果图。",
+      );
       return;
     }
     if (
@@ -688,8 +824,16 @@ export function CreationStudio({
       return;
     }
     const payload =
-      imageMode === "text"
-        ? { mode: imageMode, prompt: prompt.trim(), size, credentials }
+      optimizing && productImage
+        ? {
+            mode: "optimize",
+            images: [productImage.data],
+            prompt: prompt.trim(),
+            resolution,
+            originalWidth: productImage.originalWidth,
+            originalHeight: productImage.originalHeight,
+            credentials,
+          }
         : {
             mode: imageMode,
             images: references.filter(Boolean).map((item) => item!.data),
@@ -818,25 +962,30 @@ export function CreationStudio({
       setResultBusy(null);
     }
   }
-  async function generateCopy() {
-    if (copySubmitLock.current) return;
+  async function generateCopy(revise = false) {
+    if (!ready || copySubmitLock.current) return;
     setCopyError("");
     setCopyNotice("");
-    setCopyWarnings([]);
-    if (!ready) {
-      onSettings();
-      return;
-    }
-    if (copyMode === "idea" && !idea.trim()) {
+    const original = revise ? copyBrief.current : null;
+    if (revise && (!copyResult || !original || !feedback.trim())) return;
+    if (!revise && copyMode === "idea" && !idea.trim()) {
       setCopyError("先写下你的想法，再开始生成文案。");
       return;
     }
-    if (copyMode === "rewrite" && !source?.content.trim()) {
+    if (!revise && copyMode === "rewrite" && !source?.content.trim()) {
       setCopyError("请先选择一篇小红书笔记作为改写参考。");
       return;
     }
+    const brief: CopyBrief = original ?? {
+      mode: copyMode,
+      ...(copyMode === "idea" ? { idea: idea.trim() } : {
+        source: { id: source!.id, title: source!.title, content: source!.content, url: source!.url },
+      }),
+      requirements: requirements.trim(),
+      experience: experience.trim(),
+    };
     copySubmitLock.current = true;
-    setCopyBusy(true);
+    setCopyOperation(revise ? "revise" : "generate");
     const requestVersion = ++copyRequestVersion.current;
     const controller = new AbortController();
     copyController.current = controller;
@@ -851,19 +1000,13 @@ export function CreationStudio({
       const result = await post<CopyResult>(
         "/api/create/copy",
         {
-          mode: copyMode,
-          ...(copyMode === "idea"
-            ? { idea: idea.trim() }
-            : {
-                source: {
-                  id: source!.id,
-                  title: source!.title,
-                  content: source!.content,
-                  url: source!.url,
-                },
-              }),
-          requirements: requirements.trim(),
-          experience: experience.trim(),
+          ...brief,
+          ...(revise && copyResult && {
+            revision: {
+              feedback: feedback.trim(),
+              draft: { title: copyResult.title, content: copyResult.content, tags: draftTags },
+            },
+          }),
           credentials,
         },
         controller.signal,
@@ -877,7 +1020,12 @@ export function CreationStudio({
       )
         throw new Error("服务返回的文案格式不完整，请重新生成。");
       if (alive.current && requestVersion === copyRequestVersion.current) {
-        setCopyResult(result);
+        copyBrief.current = brief;
+        const id = revise && copyResult ? copyResult.id : `ai-note-${crypto.randomUUID()}`;
+        setCopyResult({ ...result, id, signedBy: revise ? copyResult?.signedBy : undefined });
+        if (!revise) setNoteImages([]);
+        setFeedback("");
+        setEditingNote(false);
         setCopyWarnings(
           Array.isArray(result.warnings)
             ? result.warnings.filter((item) => typeof item === "string")
@@ -889,7 +1037,8 @@ export function CreationStudio({
             .map((tag) => `#${tag.replace(/^#+/, "")}`)
             .join(" "),
         );
-        setCopyNotice("文案已生成，可直接修改标题、正文与话题。");
+        setCopyNotice(revise ? "已按修改意见生成新稿，请再次审核。" : "初稿已生成，请审核下方笔记。");
+        reviewHeading.current?.focus();
       }
     } catch (error) {
       if (alive.current && requestVersion === copyRequestVersion.current)
@@ -903,7 +1052,7 @@ export function CreationStudio({
       clearTimeout(timeout);
       if (requestVersion === copyRequestVersion.current) {
         copySubmitLock.current = false;
-        if (alive.current) setCopyBusy(false);
+        if (alive.current) setCopyOperation(null);
       }
     }
   }
@@ -911,7 +1060,7 @@ export function CreationStudio({
     return [
       copyResult?.title.trim(),
       copyResult?.content.trim(),
-      tagsText.trim(),
+      formattedTags,
     ]
       .filter(Boolean)
       .join("\n\n");
@@ -925,39 +1074,42 @@ export function CreationStudio({
     }
   }
   async function saveNote() {
-    if (noteSaving || !copyResult) return;
-    if (!copyResult.title.trim() || !copyResult.content.trim()) {
-      setCopyError("保存前请填写标题与正文。");
-      return;
-    }
+    if (noteSaving || copyBusy || !copyResult || draftError || !creatorName.trim()) return;
+    const version = copyRequestVersion.current;
     setNoteSaving(true);
     setCopyError("");
+    setCopyNotice("");
     try {
+      const images: WorkDraft["images"] = [];
+      for (const item of noteImages) {
+        const blob = typeof item.image === "string" ? await getResultBlob(item.image) : item.image;
+        images.push({ title: item.title || `配图 ${images.length + 1}`, blob });
+      }
       await onSaveNote({
+        id: copyResult.id,
         title: copyResult.title.trim(),
-        content: [copyResult.content.trim(), tagsText.trim()]
-          .filter(Boolean)
-          .join("\n\n"),
+        content: copyResult.content.trim(),
+        tags: draftTags,
+        images,
       });
-      setCopyNotice("文案已保存到素材库。");
+      if (alive.current && version === copyRequestVersion.current) {
+        setCopyResult((draft) => draft && { ...draft, signedBy: draft.signedBy ?? creatorName.trim() });
+        setCopyNotice("笔记已保存到作品库，可查看完整作品。");
+      }
     } catch (error) {
-      setCopyError(message(error, "保存失败，请重试。"));
+      if (alive.current && version === copyRequestVersion.current)
+        setCopyError(message(error, "作品保存失败，当前稿件已保留。"));
     } finally {
-      setNoteSaving(false);
+      if (alive.current) setNoteSaving(false);
     }
   }
 
   return (
     <div className="creation-studio">
       {!ready && (
-        <div className="cs-connection">
-          <span>
-            <Settings2 size={17} /> 连接百炼后，即可使用图片与文案创作。
-          </span>
-          <button type="button" onClick={onSettings}>
-            前往设置 <ArrowRight size={15} />
-          </button>
-        </div>
+        <p className="cs-connection" id="cs-qwen-unavailable" role="status">
+          千问服务尚未配置。在「设置」中配置千问后，即可生成图片和文案。
+        </p>
       )}
       <div className="cs-live-service">
         <span>
@@ -991,16 +1143,17 @@ export function CreationStudio({
             <button
               type="button"
               role="tab"
-              aria-selected={imageMode === "text"}
+              aria-selected={optimizing}
               disabled={imageWorking || processingIndex !== null}
-              className={imageMode === "text" ? "active" : ""}
+              className={optimizing ? "active" : ""}
               onClick={() => {
-                setImageMode("text");
+                setImageMode("optimize");
                 setImageError("");
+                setImageNotice("");
               }}
             >
               <Sparkles size={16} />
-              文生图
+              图片优化
             </button>
             <button
               type="button"
@@ -1011,6 +1164,7 @@ export function CreationStudio({
               onClick={() => {
                 setImageMode("reference");
                 setImageError("");
+                setImageNotice("");
               }}
             >
               <ImageIcon size={16} />
@@ -1018,46 +1172,29 @@ export function CreationStudio({
             </button>
           </div>
           <div className="cs-form-body">
-            {imageMode === "text" ? (
-              <div className="cs-field">
-                <label htmlFor="cs-prompt">
-                  描述你想看到的画面 <span>必填</span>
-                </label>
-                <textarea
-                  id="cs-prompt"
-                  value={prompt}
-                  disabled={imageWorking}
-                  maxLength={2000}
-                  onChange={(event) => setPrompt(event.target.value)}
-                  placeholder="例如：一家安静的街角咖啡馆，木质桌面上一杯热拿铁，午后阳光穿过玻璃窗，真实摄影风格，温暖自然的色调。"
-                  rows={6}
-                />
-                <div className="cs-field-caption">
-                  <span>主体、场景、光线和风格，描述越清楚越好。</span>
-                  <span>{prompt.length}/2000</span>
-                </div>
-              </div>
-            ) : (
-              <div className="cs-reference-area">
+            <div className="cs-reference-area">
                 <div className="cs-reference-heading">
                   <div>
                     <h3>
-                      参考图片 <span>{selectedCount}/10</span>
+                      {optimizing ? "产品效果图" : "参考图片"}{" "}
+                      {!optimizing && <span>{selectedCount}/10</span>}
                     </h3>
-                    <p>图 1 是效果参考，其余图片是素材原图。</p>
+                    <p>{optimizing
+                      ? "上传一张效果图，重绘后保持原图比例。"
+                      : "图 1 是效果参考，其余图片是素材原图。"}</p>
                   </div>
-                  <span className="cs-reference-count">至少 2 张</span>
+                  <span className="cs-reference-count">{optimizing ? "单图重绘" : "至少 2 张"}</span>
                 </div>
                 <div className="cs-reference-grid">
-                  {references.map((item, index) => (
+                  {(optimizing ? [productImage] : references).map((item, index) => (
                     <div
                       key={index}
                       className={`cs-reference-slot ${index === 0 ? "cs-style-slot" : ""} ${item ? "filled" : ""}`}
                     >
                       <div className="cs-slot-label">
-                        <span>图 {index + 1}</span>
+                        <span>{optimizing ? "原图" : `图 ${index + 1}`}</span>
                         <strong>
-                          {index === 0 ? "效果参考图" : "素材原图"}
+                          {optimizing ? "待优化图片" : index === 0 ? "效果参考图" : "素材原图"}
                         </strong>
                       </div>
                       {item ? (
@@ -1068,7 +1205,7 @@ export function CreationStudio({
                             onClick={() =>
                               setPreview({
                                 url: item.data,
-                                title: `图 ${index + 1} · ${index === 0 ? "效果参考图" : "素材原图"}`,
+                                title: optimizing ? "产品效果图" : `图 ${index + 1} · ${index === 0 ? "效果参考图" : "素材原图"}`,
                               })
                             }
                           >
@@ -1084,8 +1221,15 @@ export function CreationStudio({
                           <div className="cs-reference-meta">
                             <span title={item.name}>{item.name}</span>
                             <small>
-                              {item.width} × {item.height}
+                              {optimizing
+                                ? `原图 ${item.originalWidth} × ${item.originalHeight}`
+                                : `${item.width} × ${item.height}`}
                             </small>
+                            {optimizing && (
+                              <small>
+                                预计输出 {optimizedImageSize(item.originalWidth, item.originalHeight, resolution).replace("*", " × ")}
+                              </small>
+                            )}
                           </div>
                           <div className="cs-reference-actions">
                             <button
@@ -1105,10 +1249,11 @@ export function CreationStudio({
                                 imageWorking || processingIndex !== null
                               }
                               onClick={() => setLibrarySlot(index)}
-                              aria-label={`从产品库替换图 ${index + 1}`}
+                              aria-label={`从${index > 0 ? "素材库" : "产品资料库"}替换图 ${index + 1}`}
                             >
                               <FolderOpen size={13} />
                             </button>
+                            {!optimizing && <>
                             <button
                               type="button"
                               disabled={
@@ -1133,6 +1278,7 @@ export function CreationStudio({
                             >
                               <ArrowRight size={13} />
                             </button>
+                            </>}
                             <button
                               type="button"
                               disabled={
@@ -1159,7 +1305,7 @@ export function CreationStudio({
                                 <Plus size={23} />
                               </span>
                               <p>
-                                {index === 0
+                                {optimizing ? "选择需要重绘的产品效果图" : index === 0
                                   ? "参考构图、氛围与风格"
                                   : "上传需要呈现的产品素材"}
                               </p>
@@ -1183,7 +1329,7 @@ export function CreationStudio({
                                 }
                               >
                                 <FolderOpen size={14} />
-                                从产品资料库选择
+                                {index > 0 ? "从素材库选择" : "从产品资料库选择"}
                               </button>
                             </>
                           )}
@@ -1199,27 +1345,60 @@ export function CreationStudio({
                   ))}
                 </div>
                 <p className="cs-reference-tip">
-                  按顺序填满后，会自动出现下一个入口，最多 10 张。支持 JPG / PNG
-                  / WebP；自动缩至长边 1536 像素。
+                  {optimizing
+                    ? "支持 JPG、PNG、WebP，原图最大 30 MB。"
+                    : "按顺序填满后，会自动出现下一个入口，最多 10 张。支持 JPG / PNG / WebP；自动缩至长边 1536 像素。"}
                 </p>
-                <div className="cs-reference-size">
+                {!optimizing && <div className="cs-reference-size">
                   <span>已处理图片 · 单张不超过 1.5 MB</span>
                   <span>{(payloadBytes / 1024 / 1024).toFixed(2)} / 8 MB</span>
+                </div>}
+              </div>
+            {optimizing && (
+              <div className="cs-field">
+                <label htmlFor="cs-prompt">重绘提示词 <span>必填</span></label>
+                <textarea
+                  id="cs-prompt"
+                  value={prompt}
+                  disabled={imageWorking}
+                  maxLength={2000}
+                  onChange={(event) => setPrompt(event.target.value)}
+                  placeholder="例如：保留瓶身、标签和包装颜色，把背景换成浅米色桌面，左侧加入柔和的自然光。"
+                  rows={4}
+                />
+                <div className="cs-field-caption">
+                  <span>写下想保留的细节，以及希望改变的地方。</span>
+                  <span>{prompt.length}/2000</span>
                 </div>
               </div>
             )}
             <div className="cs-field cs-size-field">
-              <label htmlFor="cs-size">画面比例</label>
+              <label htmlFor="cs-size">{optimizing ? "输出分辨率" : "画幅比例"}</label>
               <div className="cs-select-wrap">
                 <select
                   id="cs-size"
-                  value={size}
+                  value={optimizing ? resolution : size}
                   disabled={imageWorking}
-                  onChange={(event) => setSize(event.target.value)}
+                  onChange={(event) => {
+                    const value = event.target.value;
+                    if (optimizing) setResolution(value === "2K" ? "2K" : "1K");
+                    else setSize(value);
+                  }}
                 >
-                  <option value="1024*1024">1:1 · 方形</option>
-                  <option value="768*1024">3:4 · 竖图</option>
-                  <option value="1024*768">4:3 · 横图</option>
+                  {optimizing ? (
+                    <>
+                      <option value="1K">1K · 约 100 万像素</option>
+                      <option value="2K">2K · 约 400 万像素</option>
+                    </>
+                  ) : (
+                    <>
+                      <option value="1024*1024">1:1 · 方形</option>
+                      <option value="768*1024">3:4 · 竖图</option>
+                      <option value="1024*768">4:3 · 横图</option>
+                      <option value="1280*720">16:9 · 宽屏横图</option>
+                      <option value="720*1280">9:16 · 全屏竖图</option>
+                    </>
+                  )}
                 </select>
                 <ChevronDown size={16} />
               </div>
@@ -1297,15 +1476,16 @@ export function CreationStudio({
                   </strong>
                   <p>
                     {!ready
-                      ? "配置服务后，可继续查询这次生成结果。"
+                      ? "配置千问后，即可继续查询这次任务。"
                       : "切换页面或刷新后可继续查询，无需重复提交。"}
                   </p>
                 </div>
                 <button
                   type="button"
+                  disabled={!ready}
+                  aria-describedby={ready ? undefined : "cs-qwen-unavailable"}
                   onClick={() => {
-                    if (!ready) onSettings();
-                    else if (paused) {
+                    if (paused) {
                       setPaused(false);
                       setPollVersion((value) => value + 1);
                       setImageNotice("");
@@ -1316,7 +1496,7 @@ export function CreationStudio({
                     }
                   }}
                 >
-                  {!ready ? "去配置" : paused ? "继续查询" : "暂停查询"}
+                  {!ready || paused ? "继续查询" : "暂停查询"}
                 </button>
               </div>
             ) : (
@@ -1325,8 +1505,9 @@ export function CreationStudio({
                 className="cs-generate-button"
                 onClick={() => void generateImage()}
                 disabled={
-                  imageStatus === "submitting" || processingIndex !== null
+                  !ready || imageStatus === "submitting" || processingIndex !== null
                 }
+                aria-describedby={ready ? undefined : "cs-qwen-unavailable"}
               >
                 {imageStatus === "submitting" ? (
                   <LoaderCircle size={18} className="spin" />
@@ -1335,9 +1516,7 @@ export function CreationStudio({
                 )}
                 {imageStatus === "submitting"
                   ? "正在提交生成任务…"
-                  : ready
-                    ? "生成图片"
-                    : "配置服务，开始创作"}
+                  : optimizing ? "开始重绘" : "生成图片"}
                 <ArrowRight size={17} />
               </button>
             )}
@@ -1443,7 +1622,7 @@ export function CreationStudio({
                 <p>
                   {imageWorking
                     ? "生成完成后，图片会展示在这里。"
-                    : "描述一个画面，或上传参考图与产品素材。"}
+                    : optimizing ? "上传产品效果图，写下提示词后即可重绘。" : "上传效果参考图与产品素材后即可生成。"}
                 </p>
               </div>
             )}
@@ -1597,112 +1776,175 @@ export function CreationStudio({
                 <span>{requirements.length}/2000</span>
               </div>
             </div>
-            {copyError && (
+            {!copyResult && copyError && (
               <p className="cs-message cs-error" role="alert">
                 {copyError}
-              </p>
-            )}
-            {copyWarnings.map((warning, index) => (
-              <p className="cs-message cs-warning" key={index}>
-                {warning}
-              </p>
-            ))}
-            {copyNotice && (
-              <p className="cs-message cs-success" role="status">
-                <CheckCircle2 size={16} />
-                {copyNotice}
               </p>
             )}
             <button
               type="button"
               className="cs-generate-button"
               onClick={() => void generateCopy()}
-              disabled={copyBusy}
+              disabled={!ready || copyBusy || noteSaving}
+              aria-describedby={ready ? undefined : "cs-qwen-unavailable"}
             >
               {copyBusy ? (
                 <LoaderCircle size={18} className="spin" />
               ) : (
                 <WandSparkles size={18} />
               )}
-              {copyBusy
+              {copyOperation === "generate"
                 ? "正在整理你的灵感…"
-                : ready
-                  ? copyMode === "rewrite"
-                    ? "生成改写文案"
-                    : "生成文案"
-                  : "配置服务，开始创作"}
+                : copyMode === "rewrite" ? "生成改写文案" : "生成文案"}
               <ArrowRight size={17} />
             </button>
             <p className="cs-service-caption">
               <span>AI 文案创作</span>
-              <span>生成后仍可自由编辑</span>
+              <span>标题 · 正文 · 5 个热门标签</span>
             </p>
           </div>
           <div className="cs-output-area">
             <div className="cs-output-heading">
-              <h3>文案结果</h3>
+              <h3 ref={reviewHeading} tabIndex={-1}>笔记预览</h3>
               {copyResult && (
                 <span>
-                  {copyBusy ? "上一次结果 · 生成中" : "可编辑 · 请核对事实"}
+                  {copyBusy ? "正在生成 · 当前稿件已保留" : "请核对内容与产品事实"}
                 </span>
               )}
             </div>
             {copyResult ? (
               <div className="cs-copy-editor">
-                <div className="cs-field">
-                  <label htmlFor="cs-result-title">标题</label>
-                  <input
-                    id="cs-result-title"
-                    value={copyResult.title}
-                    maxLength={200}
-                    onChange={(event) => {
-                      setCopyResult({
-                        ...copyResult,
-                        title: event.target.value,
-                      });
-                      setCopyNotice("");
-                    }}
-                  />
+                {copyNotice && (
+                  <p className="cs-message cs-success" role="status">
+                    <CheckCircle2 size={16} />{copyNotice}
+                  </p>
+                )}
+                {copyWarnings.map((warning) => (
+                  <p className="cs-message cs-warning" key={warning}>{warning}</p>
+                ))}
+                {!editingNote && (
+                  <article className="cs-note-preview" aria-label="笔记内容">
+                    <h4>{copyResult.title}</h4>
+                    <p>{copyResult.content}</p>
+                    <ul aria-label="热门标签">
+                      {draftTags.map((tag, index) => <li key={index}>#{tag}</li>)}
+                    </ul>
+                  </article>
+                )}
+                <button
+                  type="button"
+                  className="cs-edit-draft"
+                  aria-expanded={editingNote}
+                  disabled={copyBusy || noteSaving}
+                  onClick={() => setEditingNote(!editingNote)}
+                >
+                  {editingNote ? "查看排版预览" : "手动编辑文案"}
+                </button>
+                {editingNote && (
+                  <fieldset className="cs-note-fields" disabled={copyBusy || noteSaving}>
+                    <div className="cs-field">
+                      <label htmlFor="cs-result-title">标题 <span>{countCharacters(copyResult.title)}/20 字符 · 1 个表情</span></label>
+                      <input
+                        id="cs-result-title"
+                        value={copyResult.title}
+                        maxLength={200}
+                        onChange={(event) => {
+                          setCopyResult({
+                            ...copyResult,
+                            title: event.target.value,
+                          });
+                          setCopyNotice("");
+                        }}
+                      />
+                    </div>
+                    <div className="cs-field">
+                      <label htmlFor="cs-result-content">
+                        正文 <span>每 30–40 个字符配 1 个表情</span>
+                      </label>
+                      <textarea
+                        id="cs-result-content"
+                        value={copyResult.content}
+                        maxLength={12000}
+                        rows={12}
+                        onChange={(event) => {
+                          setCopyResult({
+                            ...copyResult,
+                            content: event.target.value,
+                          });
+                          setCopyNotice("");
+                        }}
+                      />
+                    </div>
+                    <div className="cs-field">
+                      <label htmlFor="cs-result-tags">热门标签 <span>{draftTags.length}/5</span></label>
+                      <textarea
+                        id="cs-result-tags"
+                        value={tagsText}
+                        maxLength={1000}
+                        rows={2}
+                        onChange={(event) => {
+                          setTagsText(event.target.value);
+                          setCopyNotice("");
+                        }}
+                      />
+                    </div>
+                  </fieldset>
+                )}
+                {draftError && <p className="cs-message cs-warning">{draftError}</p>}
+                <div className="cs-revision">
+                  <div className="cs-field">
+                    <label htmlFor="cs-feedback">修改意见</label>
+                    <textarea
+                      id="cs-feedback"
+                      value={feedback}
+                      onChange={(event) => setFeedback(event.target.value)}
+                      maxLength={2000}
+                      disabled={copyBusy || noteSaving}
+                      placeholder="例如：保留第二段，把开头改成问句，语气再自然一点。"
+                      rows={3}
+                    />
+                  </div>
+                  <button
+                    type="button"
+                    className="cs-generate-button"
+                    disabled={!ready || copyBusy || noteSaving || !feedback.trim()}
+                    aria-describedby={ready ? undefined : "cs-qwen-unavailable"}
+                    onClick={() => void generateCopy(true)}
+                  >
+                    {copyOperation === "revise" ? <LoaderCircle size={16} className="spin" /> : <RefreshCw size={16} />}
+                    {copyOperation === "revise" ? "正在按意见改稿…" : "按修改意见重新生成"}
+                  </button>
                 </div>
-                <div className="cs-field">
-                  <label htmlFor="cs-result-content">
-                    正文 <span>{copyResult.content.length} 字</span>
-                  </label>
-                  <textarea
-                    id="cs-result-content"
-                    value={copyResult.content}
-                    maxLength={12000}
-                    rows={12}
-                    onChange={(event) => {
-                      setCopyResult({
-                        ...copyResult,
-                        content: event.target.value,
-                      });
-                      setCopyNotice("");
-                    }}
-                  />
+                <NoteImagePicker
+                  generated={imageResult?.images}
+                  products={productImages}
+                  selected={noteImages}
+                  onChange={(next) => { setNoteImages(next); setCopyNotice(""); }}
+                  disabled={copyBusy || noteSaving}
+                />
+                <div className="cs-field cs-work-creator">
+                  {onCreatorNameChange && !copyResult.signedBy ? (
+                    <>
+                      <label htmlFor="cs-work-creator">创作者用户名</label>
+                      <input id="cs-work-creator" value={creatorName} maxLength={60}
+                        disabled={copyBusy || noteSaving}
+                        placeholder="填写作品署名"
+                        onChange={(event) => { onCreatorNameChange(event.target.value); setCopyNotice(""); }} />
+                      {!creatorName.trim() && <p className="cs-input-hint">请先填写用户名，首次保存作品后会在此浏览器中记住。</p>}
+                    </>
+                  ) : (
+                    <p>创作者用户名 <strong>{copyResult.signedBy || creatorName || "正在读取…"}</strong></p>
+                  )}
                 </div>
-                <div className="cs-field">
-                  <label htmlFor="cs-result-tags">话题</label>
-                  <textarea
-                    id="cs-result-tags"
-                    value={tagsText}
-                    maxLength={1000}
-                    rows={2}
-                    onChange={(event) => {
-                      setTagsText(event.target.value);
-                      setCopyNotice("");
-                    }}
-                  />
-                </div>
+                {copyError && <p className="cs-message cs-error" role="alert">{copyError}</p>}
                 <div className="cs-copy-actions">
-                  <button type="button" onClick={() => void copyNote()}>
+                  <button type="button" disabled={copyBusy || !!draftError} onClick={() => void copyNote()}>
                     <Copy size={15} />
                     复制完整文案
                   </button>
                   <button
                     type="button"
-                    disabled={noteSaving || !copyResult.content.trim()}
+                    disabled={noteSaving || copyBusy || !!draftError || !creatorName.trim()}
                     onClick={() => void saveNote()}
                   >
                     {noteSaving ? (
@@ -1710,7 +1952,7 @@ export function CreationStudio({
                     ) : (
                       <Save size={15} />
                     )}
-                    {noteSaving ? "正在保存…" : "保存到素材库"}
+                    {noteSaving ? "正在保存作品…" : copyResult.signedBy ? "审核通过，更新作品" : "审核通过，保存到作品库"}
                   </button>
                 </div>
               </div>
@@ -1724,7 +1966,7 @@ export function CreationStudio({
                 </strong>
                 <p>
                   {copyBusy
-                    ? "完成后可修改标题、正文和话题。"
+                    ? "生成后可预览笔记并提出修改意见。"
                     : "写下你的想法，或选择一篇笔记开始改写。"}
                 </p>
               </div>
@@ -1733,6 +1975,7 @@ export function CreationStudio({
         </section>
       </div>
       <input
+        key={imageMode}
         ref={fileInput}
         type="file"
         accept="image/jpeg,image/png,image/webp"
@@ -1744,23 +1987,24 @@ export function CreationStudio({
       />
       {librarySlot !== null && (
         <Modal
-          title={`为图 ${librarySlot + 1} 选择${librarySlot === 0 ? "效果参考图" : "素材原图"}`}
+          title={optimizing ? "选择要优化的产品效果图" : `为图 ${librarySlot + 1} 选择${librarySlot === 0 ? "效果参考图" : "素材原图"}`}
           onClose={() => setLibrarySlot(null)}
         >
           <p className="cs-library-description">
-            图片来自你的产品资料库，选择后会自动处理尺寸与体积。
+            {pickingMaterial ? "选择素材库中已收藏作品的图片。" : "图片来自你的产品资料库，选择后会自动处理尺寸与体积。"}
           </p>
-          {productImages.length ? (
+          {pickerImages.length ? (
             <div className="cs-library-grid">
-              {productImages.map((item) => (
+              {pickerImages.map((item) => (
                 <LibraryThumbnail
                   item={item}
                   key={item.id}
                   onSelect={() =>
                     void useImage(
-                      item.blob,
-                      item.title || "产品图片",
+                      item.image,
+                      item.title || (pickingMaterial ? "素材图片" : "产品图片"),
                       librarySlot,
+                      item.demo,
                     )
                   }
                 />
@@ -1769,8 +2013,8 @@ export function CreationStudio({
           ) : (
             <div className="cs-modal-empty">
               <FolderOpen size={35} />
-              <h4>产品资料库还没有图片</h4>
-              <p>可以先上传本地图片，或将采集笔记的图片保存到产品资料库。</p>
+              <h4>{pickingMaterial ? "素材库还没有可选图片" : "产品资料库还没有图片"}</h4>
+              <p>{pickingMaterial ? "在创作中心收藏带图作品后，就能在这里选择图片。" : "可以先上传本地图片，或将采集笔记的图片保存到产品资料库。"}</p>
               <button
                 type="button"
                 onClick={() => {

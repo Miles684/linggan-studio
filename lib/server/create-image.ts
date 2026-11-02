@@ -1,3 +1,6 @@
+import { Buffer } from "node:buffer";
+import { imageSize } from "image-size";
+import { optimizedImageSize } from "../image-size";
 import { detectImageType, isGeneratedImageHost } from "./import-image";
 import { ServiceError } from "./services";
 
@@ -9,7 +12,7 @@ const BASE_URL = "https://dashscope.aliyuncs.com";
 const MAX_BODY_BYTES = 8 * 1024 * 1024;
 const MAX_REFERENCE_BYTES = 1.5 * 1024 * 1024;
 const MAX_RESPONSE_BYTES = 1024 * 1024;
-const SIZES = ["1024*1024", "768*1024", "1024*768"];
+const SIZES = ["1024*1024", "768*1024", "1024*768", "1280*720", "720*1280"];
 const TASK_ID =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 type Json = Record<string, unknown>;
@@ -85,45 +88,13 @@ function validateSubmission(raw: unknown) {
   if (!raw || typeof raw !== "object" || Array.isArray(raw))
     invalid("图片创作请求无效。");
   const body = record(raw);
-  if (
-    Object.keys(body).some(
-      (key) =>
-        !["mode", "prompt", "images", "size", "credentials"].includes(key),
-    )
-  )
+  if (body.mode !== "optimize" && body.mode !== "reference")
+    invalid("请选择图片优化或图生图。");
+  const fields = body.mode === "reference"
+    ? ["mode", "images", "credentials", "size"]
+    : ["mode", "images", "credentials", "prompt", "resolution", "originalWidth", "originalHeight"];
+  if (Object.keys(body).some((key) => !fields.includes(key)))
     invalid("图片创作请求包含不支持的字段。");
-  if (body.mode !== "text" && body.mode !== "reference")
-    invalid("请选择文生图或参考图创作。");
-  if (typeof body.size !== "string" || !SIZES.includes(body.size))
-    invalid("请选择支持的图片尺寸。");
-
-  let images: string[] = [];
-  let prompt: string;
-  if (body.mode === "reference") {
-    if (body.prompt !== undefined)
-      invalid("参考图创作使用固定提示词，不支持自定义提示词。");
-    if (
-      !Array.isArray(body.images) ||
-      body.images.length < 2 ||
-      body.images.length > 10
-    )
-      invalid("参考图创作需要 2 至 10 张图片，第一张为产品效果图。");
-    images = body.images.map(validateReference);
-    prompt = REFERENCE_IMAGE_PROMPT;
-  } else {
-    if (
-      body.images !== undefined &&
-      (!Array.isArray(body.images) || body.images.length !== 0)
-    )
-      invalid("文生图模式不接受参考图片。");
-    if (
-      typeof body.prompt !== "string" ||
-      !body.prompt.trim() ||
-      body.prompt.length > 2000
-    )
-      invalid("请输入 1 至 2000 字的图片提示词。");
-    prompt = body.prompt.trim();
-  }
 
   // The route bounds the incoming stream too. This also protects direct callers.
   let serialized: string;
@@ -141,7 +112,66 @@ function validateSubmission(raw: unknown) {
       "IMAGE_PAYLOAD_TOO_LARGE",
       413,
     );
-  return { images, prompt, size: body.size };
+  if (body.mode === "reference") {
+    if (typeof body.size !== "string" || !SIZES.includes(body.size))
+      invalid("请选择支持的图片画幅比例。");
+    if (
+      !Array.isArray(body.images) ||
+      body.images.length < 2 ||
+      body.images.length > 10
+    )
+      invalid("图生图需要 2 至 10 张图片，第一张为产品效果图。");
+    return {
+      images: body.images.map(validateReference),
+      prompt: REFERENCE_IMAGE_PROMPT,
+      size: body.size,
+    };
+  }
+
+  if (!Array.isArray(body.images) || body.images.length !== 1)
+    invalid("图片优化需要上传一张产品效果图。");
+  if (
+    typeof body.prompt !== "string" ||
+    !body.prompt.trim() ||
+    body.prompt.length > 2000
+  )
+    invalid("请输入 1 至 2000 字的图片优化提示词。");
+  if (body.resolution !== "1K" && body.resolution !== "2K")
+    invalid("请选择支持的输出分辨率。");
+  const image = validateReference(body.images[0]);
+  const { originalWidth, originalHeight } = body;
+  if (
+    typeof originalWidth !== "number" || !Number.isSafeInteger(originalWidth) || originalWidth <= 0 ||
+    typeof originalHeight !== "number" || !Number.isSafeInteger(originalHeight) || originalHeight <= 0 ||
+    originalWidth * originalHeight > 80_000_000
+  )
+    invalid("无法识别原图尺寸，请重新选择产品效果图。");
+  const ratio = originalWidth / originalHeight;
+  if (ratio > 8 || ratio < 1 / 8)
+    invalid("图片优化支持的原图长短边比例最高为 8:1，请裁剪后重试。");
+
+  let dimensions: ReturnType<typeof imageSize>;
+  try {
+    const encoded = image.slice(image.indexOf(",") + 1);
+    dimensions = imageSize(Buffer.from(encoded, "base64"));
+  } catch {
+    invalid("无法读取效果图尺寸，请重新选择图片。", "INVALID_IMAGE_DATA");
+  }
+  const { width, height } = dimensions;
+  // Browser compression scales both edges and rounds them to whole pixels.
+  // Check the shorter edge in pixels and guard tiny images against ratio overrides.
+  const expectedShort = ratio >= 1 ? width / ratio : height * ratio;
+  const actualShort = ratio >= 1 ? height : width;
+  if (
+    !width || !height || Math.max(width, height) > 8000 ||
+    Math.abs(actualShort - expectedShort) > Math.min(2, actualShort * 0.02)
+  )
+    invalid("原图和上传图片的画幅不一致，请重新选择图片。");
+  return {
+    images: [image],
+    prompt: body.prompt.trim(),
+    size: optimizedImageSize(originalWidth, originalHeight, body.resolution),
+  };
 }
 
 function upstreamError(status: number, code?: unknown): ServiceError {
@@ -154,7 +184,7 @@ function upstreamError(status: number, code?: unknown): ServiceError {
     )
   )
     return new ServiceError(
-      "百炼密钥无效或无权访问图片模型，请检查北京地域服务配置。",
+      "千问图片服务鉴权失败，请检查当前使用的密钥和北京地域模型权限。",
       401,
       "INVALID_CREDENTIALS",
     );

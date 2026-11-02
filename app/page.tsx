@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useRef, useState } from "react";
+import { useContext, useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowDownToLine,
   ArrowRight,
@@ -21,6 +21,7 @@ import {
   LayoutDashboard,
   LoaderCircle,
   Menu,
+  MessageCircle,
   Plus,
   Search,
   Settings2,
@@ -36,9 +37,13 @@ import type {
   Platform,
   Transcript,
 } from "../lib/types";
-import { getDemo } from "../lib/demo";
+import { getDemoTranscript } from "../lib/demo";
 import { ProductLibrary, NoteLibrary } from "../components/asset-libraries";
 import { CreationStudio } from "../components/creation-studio";
+import { DouyinStudio } from "../components/douyin-studio";
+import { CreatorAccount } from "../components/creator-account";
+import { WorksLibrary } from "../components/works-library";
+import { SiteSupport } from "../components/site-support";
 import {
   listImages,
   putImage,
@@ -48,6 +53,13 @@ import {
   deleteNote,
   imageId,
   noteId,
+  readWorkImage,
+  listWorks,
+  saveCompletedWork,
+  saveDouyinWork,
+  type DouyinWorkDraft,
+  type CompletedWork,
+  type WorkDraft,
   type LibraryImage,
   type LibraryNote,
 } from "../lib/library";
@@ -62,6 +74,21 @@ type ApiResult = {
   warning?: string;
   error?: string;
 };
+type Collection = {
+  keyword: string;
+  resultKeyword: string;
+  items: ContentItem[];
+  loading: boolean;
+  error: string;
+  warnings: string[];
+  fetchedAt: string;
+};
+function initialCollection(): Collection {
+  return {
+    keyword: "咖啡店运营", resultKeyword: "", items: [],
+    loading: false, error: "", warnings: [], fetchedAt: "",
+  };
+}
 const validItem = (value: unknown): value is ContentItem => {
   if (!value || typeof value !== "object") return false;
   const v = value as Record<string, unknown>;
@@ -82,10 +109,27 @@ const nav = [
   { label: "创作中心", icon: WandSparkles },
   { label: "产品资料库", icon: Boxes },
   { label: "素材库", icon: FolderOpen },
-  { label: "创作汇总", icon: LayoutDashboard },
-  { label: "AI智能服务", icon: Sparkles },
+  { label: "作品库", icon: LayoutDashboard },
+  { label: "智能客服", icon: MessageCircle },
   { label: "设置", icon: Settings2 },
 ];
+const keyFields = [
+  {
+    key: "qwenKey", flag: "qwenConfigured", id: "qwen-key", label: "通义千问 API Key",
+    description: "用于智能客服、小红书图文创作、抖音脚本和转写纠错。没有专用千问密钥时，自动使用百炼密钥。",
+    url: "https://bailian.console.aliyun.com/", link: "在百炼控制台管理千问密钥",
+  },
+  {
+    key: "tikhubKey", flag: "tikhubConfigured", id: "tikhub-key", label: "TikHub API Key",
+    description: "用于获取抖音、小红书的关键词搜索结果与作品详情。",
+    url: "https://tikhub.io", link: "前往 TikHub 获取密钥",
+  },
+  {
+    key: "dashscopeKey", flag: "dashscopeConfigured", id: "dashscope-key", label: "阿里云百炼 API Key",
+    description: "用于视频语音转写（北京地域）。同一把密钥也可供千问使用。",
+    url: "https://bailian.console.aliyun.com/", link: "前往阿里云百炼控制台",
+  },
+] as const;
 const number = (value: number | null | undefined) =>
   value == null
     ? "未提供"
@@ -116,26 +160,25 @@ const pause = (ms: number, signal: AbortSignal) =>
     if (signal.aborted) onAbort();
   });
 export default function Home() {
+  const accountName = useContext(CreatorAccount);
+  const [localCreator, setLocalCreator] = useState("");
+  const creatorName = accountName || localCreator;
   const [creationStep, setCreationStep] = useState<"collect" | "create">(
     "collect",
   );
-  const [creationSource, setCreationSource] = useState<ContentItem | null>(
-    null,
-  );
-  const [creationLaunchId, setCreationLaunchId] = useState(0);
+  const [xhsSource, setXhsSource] = useState<ContentItem | null>(null);
+  const [xhsLaunchId, setXhsLaunchId] = useState(0);
+  const [xhsEditorKey, setXhsEditorKey] = useState(0);
+  const [studioPlatform, setStudioPlatform] = useState<Platform>("xiaohongshu");
+  const [openedStudios, setOpenedStudios] = useState<Partial<Record<Platform, boolean>>>({});
+  const [douyinSourceId, setDouyinSourceId] = useState("");
   const [page, setPage] = useState("创作中心"),
-    [platform, setPlatform] = useState<Platform>("xiaohongshu"),
-    [keyword, setKeyword] = useState("咖啡店运营"),
-    [resultKeyword, setResultKeyword] = useState("咖啡店运营"),
-    [mode, setMode] = useState<"demo" | "live">("demo");
-  const [items, setItems] = useState<ContentItem[]>(() =>
-      getDemo("xiaohongshu"),
-    ),
-    [loading, setLoading] = useState(false),
-    [autoTranscribe, setAutoTranscribe] = useState(true),
-    [error, setError] = useState(""),
-    [warnings, setWarnings] = useState<string[]>([]),
-    [toast, setToast] = useState(""),
+    [platform, setPlatform] = useState<Platform>("xiaohongshu");
+  const [collections, setCollections] = useState<Record<Platform, Collection>>(() => ({
+    xiaohongshu: initialCollection(), douyin: initialCollection(),
+  }));
+  const { keyword, resultKeyword, items, loading, error, warnings, fetchedAt } = collections[platform];
+  const [toast, setToast] = useState(""),
     [selectedId, setSelectedId] = useState<string | null>(null),
     [lightbox, setLightbox] = useState<{
       images: string[];
@@ -144,6 +187,9 @@ export default function Home() {
     } | null>(null);
   const [productImages, setProductImages] = useState<LibraryImage[]>([]);
   const [noteMaterials, setNoteMaterials] = useState<LibraryNote[]>([]);
+  const [works, setWorks] = useState<CompletedWork[]>([]);
+  const [worksReady, setWorksReady] = useState(false);
+  const [worksError, setWorksError] = useState("");
   const [libraryTab, setLibraryTab] = useState<"notes" | "saved">("notes");
   const [libraryReady, setLibraryReady] = useState(false);
   const [libraryError, setLibraryError] = useState("");
@@ -159,25 +205,47 @@ export default function Home() {
     [config, setConfig] = useState({
       tikhubConfigured: false,
       dashscopeConfigured: false,
+      qwenConfigured: false,
     }),
-    [mobileMenu, setMobileMenu] = useState(false),
-    [fetchedAt, setFetchedAt] = useState("");
-  const generation = useRef(0),
-    control = useRef<AbortController | null>(null),
+    [mobileMenu, setMobileMenu] = useState(false);
+  const generation = useRef<Record<Platform, number>>({ douyin: 0, xiaohongshu: 0 }),
+    control = useRef<Partial<Record<Platform, AbortController>>>({}),
     savedRef = useRef<Record<string, ContentItem>>({}),
     scheduled = useRef(new Set<string>()),
     running = useRef(0);
   const selected =
-      items.find((x) => x.id === selectedId) ||
+      items.find((x) => noteId(x) === selectedId) ||
       (selectedId ? saved[selectedId] : undefined),
     tikhubReady = !!credentials.tikhubKey || config.tikhubConfigured,
     dashscopeReady = !!credentials.dashscopeKey || config.dashscopeConfigured,
-    shown = filter === "saved" ? items.filter((x) => !!saved[x.id]) : items,
+    qwenReady = !!credentials.qwenKey || config.qwenConfigured || dashscopeReady,
+    shown = filter === "saved" ? items.filter((x) => !!saved[noteId(x)]) : items,
     activeJobs = items.filter(
       (x) =>
         x.transcript?.status === "pending" ||
         x.transcript?.status === "running",
     ).length;
+  const creationKeys = useMemo(
+    () => ({ qwenKey: credentials.qwenKey, dashscopeKey: credentials.qwenKey || config.qwenConfigured ? undefined : credentials.dashscopeKey }),
+    [credentials.qwenKey, credentials.dashscopeKey, config.qwenConfigured],
+  );
+  useEffect(() => {
+    if (page !== "作品库") return;
+    let active = true;
+    setWorksReady(false);
+    setWorksError("");
+    listWorks()
+      .then((records) => {
+        if (active) {
+          setWorks(records);
+          setWorksReady(true);
+        }
+      })
+      .catch(() => {
+        if (active) setWorksError("作品库读取失败，请检查浏览器的存储权限后重试。");
+      });
+    return () => { active = false; };
+  }, [page]);
   useEffect(() => {
     let disposed = false;
     Promise.all([listImages(), listNotes()])
@@ -200,12 +268,13 @@ export default function Home() {
   }, []);
   useEffect(() => {
     try {
+      setLocalCreator((localStorage.getItem("linggan.creatorName") || "").slice(0, 60));
       const stored = JSON.parse(localStorage.getItem("linggan.saved") || "{}");
       if (stored && typeof stored === "object" && !Array.isArray(stored)) {
         const restored: Record<string, ContentItem> = {};
         for (const entry of Object.values(stored)) {
           if (validItem(entry)) {
-            restored[entry.id] =
+            restored[noteId(entry)] =
               entry.transcript?.status === "pending" ||
               entry.transcript?.status === "running"
                 ? {
@@ -233,11 +302,13 @@ export default function Home() {
           setConfig({
             tikhubConfigured: values.tikhubConfigured === true,
             dashscopeConfigured: values.dashscopeConfigured === true,
+            qwenConfigured: values.qwenConfigured === true,
           });
         }
       })
       .catch(() => {});
-    return () => control.current?.abort();
+    const controllers = control.current;
+    return () => Object.values(controllers).forEach((controller) => controller.abort());
   }, []);
   useEffect(() => {
     if (!toast) return;
@@ -270,10 +341,14 @@ export default function Home() {
       setToast("本地空间不足，收藏仅保留至本次关闭页面");
     }
   }
-  function cancel() {
-    generation.current++;
-    control.current?.abort();
-    setLoading(false);
+  function updateCollection(target: Platform, patch: Partial<Collection> | ((old: Collection) => Partial<Collection>)) {
+    setCollections((old) => ({
+      ...old, [target]: { ...old[target], ...(typeof patch === "function" ? patch(old[target]) : patch) },
+    }));
+  }
+  function cancel(target: Platform) {
+    generation.current[target]++;
+    control.current[target]?.abort();
     const stop = (x: ContentItem): ContentItem =>
       x.transcript?.status === "pending" || x.transcript?.status === "running"
         ? {
@@ -281,51 +356,48 @@ export default function Home() {
             transcript: { status: "error", error: "转写已取消，可重新转写。" },
           }
         : x;
-    setItems((old) => old.map(stop));
-    persistSaved(
+    updateCollection(target, (old) => ({ loading: false, items: old.items.map(stop) }));
+    if (target === "douyin") persistSaved(
       Object.fromEntries(
-        Object.values(savedRef.current).map((x) => [x.id, stop(x)]),
+        Object.values(savedRef.current).map((x) => [noteId(x), x.platform === target ? stop(x) : x]),
       ),
     );
   }
   function changePlatform(next: Platform) {
-    cancel();
     setPlatform(next);
-    setItems(mode === "demo" ? getDemo(next, keyword) : []);
-    setWarnings([]);
-    setError("");
     setSelectedId(null);
     setFilter("all");
-    setResultKeyword(keyword);
-    setFetchedAt("");
-  }
-  function changeMode(next: "demo" | "live") {
-    cancel();
-    setMode(next);
-    setItems(next === "demo" ? getDemo(platform, keyword) : []);
-    setWarnings([]);
-    setError("");
-    setSelectedId(null);
-    setFilter("all");
-    setFetchedAt("");
-    setResultKeyword(keyword);
   }
   function navigate(next: string) {
     setPage(next);
     setMobileMenu(false);
     window.scrollTo({ top: 0, behavior: "instant" });
   }
-  function openCreation(source?: ContentItem) {
-    if (source) {
-      setCreationSource(source);
-      setCreationLaunchId((value) => value + 1);
+  function chooseStudio(target: Platform) {
+    setStudioPlatform(target);
+    setOpenedStudios((old) => old[target] ? old : { ...old, [target]: true });
+  }
+  function openCollection(target: Platform) {
+    changePlatform(target);
+    setCreationStep("collect");
+    navigate("创作中心");
+  }
+  function openCreation(target: Platform, source?: ContentItem) {
+    if (source && source.platform !== target) return;
+    if (source && target === "douyin") {
+      if (!collections.douyin.items.some((item) => item.id === source.id)) return;
+      setDouyinSourceId(source.id);
+    } else if (source) {
+      setXhsSource(source);
+      setXhsLaunchId((value) => value + 1);
     }
+    chooseStudio(target);
     setSelectedId(null);
     setLightbox(null);
     setCreationStep("create");
     navigate("创作中心");
   }
-  const creationSources = Array.from(
+  const xhsSources = Array.from(
     new Map(
       [
         ...noteMaterials.map((note): ContentItem => ({
@@ -344,7 +416,7 @@ export default function Home() {
           demo: note.demo,
         })),
         ...Object.values(saved),
-        ...items,
+        ...collections.xiaohongshu.items,
       ]
         .filter(
           (item) => item.platform === "xiaohongshu" && item.content.trim(),
@@ -372,23 +444,26 @@ export default function Home() {
     setProductImages((old) => [record, ...old]);
     setToast("生成图片已存入产品资料库");
   }
-  async function saveCreatedNote(note: { title: string; content: string }) {
+  async function saveCreatedNote(draft: WorkDraft) {
     if (!libraryReady) throw new Error("本地资料库尚未就绪，请稍后再试。");
-    const id = `ai-note-${crypto.randomUUID()}`;
-    const record: LibraryNote = {
-      id,
-      sourceId: id,
-      platform: "xiaohongshu",
-      title: note.title,
-      author: "千问 AI 创作",
-      sourceUrl: "",
-      content: note.content,
-      createdAt: new Date().toISOString(),
-      demo: false,
-    };
-    await putNote(record);
-    setNoteMaterials((old) => [record, ...old]);
-    setToast("创作文案已存入素材库");
+    const creator = creatorName.trim();
+    if (!creator) throw new Error("请填写创作者用户名后再完成笔记。");
+    const { work, note } = await saveCompletedWork(draft, creator);
+    setNoteMaterials((old) => [note, ...old.filter((entry) => entry.id !== note.id)]);
+    rememberWork(work);
+    setToast("笔记已完成，可在作品库查看。");
+  }
+  function rememberWork(work: CompletedWork) {
+    setWorks((old) => [work, ...old.filter((entry) => entry.id !== work.id)]);
+    if (!accountName) {
+      try { localStorage.setItem("linggan.creatorName", work.creator); } catch { /* The work stores its own signature. */ }
+    }
+  }
+  async function saveCreatedScript(draft: DouyinWorkDraft, creator: string) {
+    const work = await saveDouyinWork(draft, creator);
+    rememberWork(work);
+    setToast("抖音脚本已完成，可在作品库查看。");
+    return work.creator;
   }
   async function saveNoteContent(item: ContentItem) {
     const id = noteId(item);
@@ -438,30 +513,7 @@ export default function Home() {
     setSavingImage(id);
     try {
       const originalUrl = images[index];
-      let blob: Blob;
-      if (
-        source.demo &&
-        originalUrl.startsWith("data:image/svg+xml;charset=utf-8,")
-      ) {
-        blob = new Blob(
-          [decodeURIComponent(originalUrl.split(",").slice(1).join(","))],
-          { type: "image/svg+xml" },
-        );
-      } else {
-        const response = await fetch("/api/images/import", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ url: originalUrl }),
-          signal: AbortSignal.timeout(30000),
-        });
-        if (!response.ok) {
-          const result = (await response.json().catch(() => null)) as {
-            error?: string;
-          } | null;
-          throw new Error(result?.error || "图片获取失败，请重新采集后再试。");
-        }
-        blob = await response.blob();
-      }
+      const blob = await readWorkImage(originalUrl, !!source.demo);
       const record: LibraryImage = {
         id,
         sourceId: source.id,
@@ -512,18 +564,20 @@ export default function Home() {
   }
   function saveItem(item: ContentItem) {
     const next = { ...savedRef.current };
-    if (next[item.id]) delete next[item.id];
-    else next[item.id] = item;
+    const key = noteId(item);
+    if (next[key]) delete next[key];
+    else next[key] = item;
     persistSaved(next);
-    setToast(next[item.id] ? "已保存到素材库" : "已取消收藏");
+    setToast(next[key] ? "已保存到素材库" : "已取消收藏");
   }
-  function updateTranscript(id: string, transcript: Transcript, gen: number) {
-    if (generation.current !== gen) return;
-    setItems((old) => old.map((x) => (x.id === id ? { ...x, transcript } : x)));
-    if (savedRef.current[id])
+  function updateTranscript(source: ContentItem, transcript: Transcript, gen: number) {
+    if (generation.current.douyin !== gen) return;
+    updateCollection("douyin", (old) => ({ items: old.items.map((x) => x.id === source.id ? { ...x, transcript } : x) }));
+    const key = noteId(source);
+    if (savedRef.current[key])
       persistSaved({
         ...savedRef.current,
-        [id]: { ...savedRef.current[id], transcript },
+        [key]: { ...savedRef.current[key], transcript },
       });
   }
   async function api(path: string, body: unknown, signal: AbortSignal) {
@@ -549,37 +603,37 @@ export default function Home() {
     gen: number,
     signal: AbortSignal,
   ) {
-    if (!item.videoUrl) return;
+    if (item.platform !== "douyin" || !item.videoUrl) return;
     const jobKey = `${gen}:${item.id}`;
     if (scheduled.current.has(jobKey)) return;
     scheduled.current.add(jobKey);
     let acquired = false;
-    updateTranscript(item.id, { status: "pending" }, gen);
+    updateTranscript(item, { status: "pending" }, gen);
     try {
       while (running.current >= 2) {
         await pause(150, signal);
       }
-      if (signal.aborted || gen !== generation.current) return;
+      if (signal.aborted || gen !== generation.current.douyin) return;
       running.current++;
       acquired = true;
       const task = await api(
         "/api/transcribe",
-        { videoUrl: item.videoUrl, credentials },
+        { videoUrl: item.videoUrl, credentials: { dashscopeKey: credentials.dashscopeKey } },
         signal,
       );
       if (!task.taskId) throw new Error("语音服务未返回任务编号，请重试。");
       const deadline = Date.now() + 480000;
       while (Date.now() < deadline) {
         await pause(2200, signal);
-        if (gen !== generation.current) return;
+        if (gen !== generation.current.douyin) return;
         const data = await api(
           "/api/transcribe/status",
-          { taskId: task.taskId, credentials },
+          { taskId: task.taskId, credentials: { dashscopeKey: credentials.dashscopeKey, qwenKey: credentials.qwenKey } },
           signal,
         );
         if (data.status === "SUCCEEDED") {
           updateTranscript(
-            item.id,
+            item,
             {
               status: "done",
               rawText: data.rawText,
@@ -593,7 +647,7 @@ export default function Home() {
         if (data.status === "FAILED")
           throw new Error(data.error || "语音转写失败，请重试。");
         updateTranscript(
-          item.id,
+          item,
           { status: data.status === "PENDING" ? "pending" : "running" },
           gen,
         );
@@ -602,7 +656,7 @@ export default function Home() {
     } catch (err) {
       if (!signal.aborted)
         updateTranscript(
-          item.id,
+          item,
           {
             status: "error",
             error: err instanceof Error ? err.message : "转写失败",
@@ -614,45 +668,21 @@ export default function Home() {
       if (acquired) running.current--;
     }
   }
-  async function queueTranscription(
-    list: ContentItem[],
-    gen: number,
-    signal: AbortSignal,
-  ) {
-    const jobs = list.filter((x) => !!x.videoUrl);
-    let cursor = 0;
-    await Promise.all(
-      [0, 1].map(async () => {
-        while (
-          cursor < jobs.length &&
-          !signal.aborted &&
-          gen === generation.current
-        ) {
-          const item = jobs[cursor++];
-          await transcribe(item, gen, signal);
-        }
-      }),
-    );
-  }
   async function collect() {
     const query = keyword.trim();
     if (!query) {
-      setError("请输入一个关键词，例如：咖啡店运营");
+      updateCollection(platform, { error: "请输入一个关键词，例如：咖啡店运营" });
       return;
     }
-    if (mode === "live" && !tikhubReady) {
-      setError("先在设置中配置 TikHub API Key，即可开始真实采集。");
-      setToast("请先配置 TikHub API Key");
-      setPage("设置");
+    if (!tikhubReady) {
+      updateCollection(platform, { error: "采集服务尚未连接。" });
       return;
     }
-    cancel();
-    const gen = generation.current,
+    cancel(platform);
+    const gen = generation.current[platform],
       controller = new AbortController();
-    control.current = controller;
-    setLoading(true);
-    setError("");
-    setWarnings([]);
+    control.current[platform] = controller;
+    updateCollection(platform, { loading: true, error: "", warnings: [] });
     setSelectedId(null);
     setFilter("all");
     const newRecent = [query, ...recent.filter((x) => x !== query)].slice(0, 5);
@@ -661,58 +691,49 @@ export default function Home() {
       localStorage.setItem("linggan.recent", JSON.stringify(newRecent));
     } catch {}
     try {
-      if (mode === "demo") {
-        await pause(550, controller.signal);
-        if (gen !== generation.current) return;
-        setItems(getDemo(platform, query));
-        setResultKeyword(query);
-        setFetchedAt("");
-        setToast("已更新演示内容 · 非平台实时数据");
-        return;
-      }
-      setItems([]);
+      updateCollection(platform, { items: [], resultKeyword: query, fetchedAt: "" });
+      if (platform === "douyin") setDouyinSourceId("");
       const data = await api(
         "/api/collect",
-        { platform, keyword: query, credentials, autoTranscribe },
+        { platform, keyword: query, credentials: { tikhubKey: credentials.tikhubKey } },
         controller.signal,
       );
-      if (gen !== generation.current) return;
+      if (gen !== generation.current[platform]) return;
       const results: ContentItem[] = Array.isArray(data.items)
-        ? data.items.filter(validItem)
+        ? data.items.filter(validItem).filter((item) => item.platform === platform && !item.demo).slice(0, 10)
         : [];
-      setItems(results);
-      setResultKeyword(query);
-      setFetchedAt(data.fetchedAt || new Date().toISOString());
-      setWarnings(data.warnings || []);
-      if (platform === "douyin" && autoTranscribe && dashscopeReady)
-        void queueTranscription(results, gen, controller.signal);
-      else if (platform === "douyin" && autoTranscribe && !dashscopeReady)
-        setWarnings((old) => [
-          ...old,
-          "已采集作品。配置百炼 API Key 后，可逐条转写视频语音。",
-        ]);
+      updateCollection(platform, {
+        items: results, resultKeyword: query, fetchedAt: data.fetchedAt || new Date().toISOString(),
+        warnings: data.warnings || [],
+      });
     } catch (err) {
       if (!controller.signal.aborted)
-        setError(err instanceof Error ? err.message : "采集失败，请重试。");
+        updateCollection(platform, { error: err instanceof Error ? err.message : "采集失败，请重试。" });
     } finally {
-      if (gen === generation.current) setLoading(false);
+      if (gen === generation.current[platform]) updateCollection(platform, { loading: false });
     }
   }
-  function retry(item: ContentItem) {
-    if (!dashscopeReady) {
-      setPage("设置");
-      setSelectedId(null);
-      setToast("请先配置百炼 API Key");
+  function getVoiceCopy(item: ContentItem) {
+    if (item.platform !== "douyin") return;
+    const gen = generation.current.douyin;
+    const savedTranscript = savedRef.current[noteId(item)]?.transcript;
+    if (savedTranscript?.status === "done" && (savedTranscript.correctedText?.trim() || savedTranscript.rawText?.trim())) {
+      updateTranscript(item, savedTranscript, gen);
       return;
     }
-    if (!control.current || control.current.signal.aborted)
-      control.current = new AbortController();
-    void transcribe(item, generation.current, control.current.signal);
+    if (item.demo) {
+      updateTranscript(item, getDemoTranscript(item.id), gen);
+      return;
+    }
+    if (!dashscopeReady || !item.videoUrl) return;
+    if (!control.current.douyin || control.current.douyin.signal.aborted)
+      control.current.douyin = new AbortController();
+    void transcribe(item, gen, control.current.douyin.signal);
   }
   function exportItems(list: ContentItem[]) {
     if (!list.length) return;
     const payload = {
-      mode: mode === "demo" ? "演示数据（非实时）" : "实时采集",
+      mode: "实时采集",
       keyword: resultKeyword,
       exportedAt: new Date().toISOString(),
       items: list,
@@ -724,7 +745,7 @@ export default function Home() {
     );
     const link = document.createElement("a");
     link.href = url;
-    link.download = `灵感-${platform}-${resultKeyword.replace(/[\\/:*?"<>|]/g, "-")}-${mode}.json`;
+    link.download = `灵感-${platform}-${resultKeyword.replace(/[\\/:*?"<>|]/g, "-")}-live.json`;
     link.click();
     URL.revokeObjectURL(url);
     setToast("采集内容已导出");
@@ -747,6 +768,9 @@ export default function Home() {
   }
   const transcriptView = (item: ContentItem, compact = false) => {
     const state = item.transcript;
+    const text = state?.status === "done" && (state.correctedText?.trim() || state.rawText?.trim());
+    const available = item.demo || !!item.videoUrl;
+    const serviceMissing = available && !item.demo && !dashscopeReady;
     return (
       <div className={`transcript ${compact ? "compact" : ""}`}>
         <div className="transcript-heading">
@@ -754,7 +778,7 @@ export default function Home() {
             <AudioLines size={15} />
             视频语音文案
           </span>
-          {state?.status === "done" ? (
+          {text ? (
             <small className="success">
               <CheckCircle2 size={12} />
               {item.demo
@@ -768,26 +792,30 @@ export default function Home() {
               <LoaderCircle size={12} className="spin" />
               {state.status === "pending" ? "等待转写" : "正在转写"}
             </small>
-          ) : !item.demo && item.videoUrl ? (
-            <button className="text-button" onClick={() => retry(item)}>
-              {state?.status === "error" ? "重新转写" : "转写语音"}
+          ) : available ? (
+            <button className="text-button" onClick={() => getVoiceCopy(item)} disabled={serviceMissing}>
+              {state?.status === "error" || state?.status === "done" ? "重新获取语音文案" : "获取语音文案"}
               <ArrowRight size={12} />
             </button>
           ) : (
             <small>暂无可转写视频</small>
           )}
         </div>
-        {state?.status === "done" ? (
+        {text ? (
           <p className={compact ? "line-clamp-2" : ""}>
-            {state.correctedText || state.rawText || "未识别到语音内容。"}
+            {text}
           </p>
+        ) : serviceMissing ? (
+          <p>语音转写服务尚未连接。</p>
         ) : state?.status === "error" ? (
           <p className="error-text">{state.error}</p>
         ) : (
           <p>
             {state?.status === "pending" || state?.status === "running"
               ? "百炼正在识别视频语音，完成后将使用千问纠正错别字。"
-              : "提取口播文案，留住每一个创作灵感。"}
+              : state?.status === "done" ? "未识别到语音内容。"
+              : available ? "选定这条作品后，点击获取语音文案。"
+              : "平台未提供可转写的视频。"}
           </p>
         )}
         {!compact && state?.warning && <p className="hint">{state.warning}</p>}
@@ -801,14 +829,14 @@ export default function Home() {
     );
   };
   const card = (item: ContentItem, index: number) => (
-    <article className="result-card" key={item.id}>
+    <article className="result-card" key={noteId(item)}>
       <div className={`rank rank-${index + 1}`}>
         {String(index + 1).padStart(2, "0")}
       </div>
       <button
         className="cover-button"
         aria-label={`查看：${item.title}`}
-        onClick={() => setSelectedId(item.id)}
+        onClick={() => setSelectedId(noteId(item))}
       >
         {safeImage(item.cover) ? (
           <img
@@ -839,7 +867,7 @@ export default function Home() {
       </button>
       <div className="result-body">
         <div className="card-title-row">
-          <button className="card-title" onClick={() => setSelectedId(item.id)}>
+          <button className="card-title" onClick={() => setSelectedId(noteId(item))}>
             {item.title}
           </button>
           {index === 0 && (
@@ -903,17 +931,22 @@ export default function Home() {
                 查看图集
               </button>
             )}
-            <button onClick={() => setSelectedId(item.id)}>
+            <button onClick={() => setSelectedId(noteId(item))}>
               查看详情
               <ChevronRight size={13} />
             </button>
             {item.platform === "xiaohongshu" && (
               <button
-                onClick={() => openCreation(item)}
+                onClick={() => openCreation("xiaohongshu", item)}
                 disabled={!item.content.trim()}
               >
                 <WandSparkles size={13} />
                 以此改写
+              </button>
+            )}
+            {item.platform === "douyin" && collections.douyin.items.some((source) => source.id === item.id) && (
+              <button onClick={() => openCreation("douyin", item)}>
+                <WandSparkles size={13} /> 引用到抖音创作
               </button>
             )}
             <button
@@ -942,7 +975,7 @@ export default function Home() {
                 target="_blank"
                 rel="noopener noreferrer"
               >
-                原文
+                {item.platform === "douyin" ? "查看抖音作品" : "原文"}
                 <ExternalLink size={12} />
               </a>
             )}
@@ -951,12 +984,12 @@ export default function Home() {
         {item.platform === "douyin" && transcriptView(item, true)}
       </div>
       <button
-        className={`save-button ${saved[item.id] ? "saved" : ""}`}
-        aria-label={saved[item.id] ? "取消收藏" : "收藏素材"}
-        title={saved[item.id] ? "取消收藏" : "收藏素材"}
+        className={`save-button ${saved[noteId(item)] ? "saved" : ""}`}
+        aria-label={saved[noteId(item)] ? "取消收藏" : "收藏素材"}
+        title={saved[noteId(item)] ? "取消收藏" : "收藏素材"}
         onClick={() => saveItem(item)}
       >
-        <Bookmark size={17} fill={saved[item.id] ? "currentColor" : "none"} />
+        <Bookmark size={17} fill={saved[noteId(item)] ? "currentColor" : "none"} />
       </button>
     </article>
   );
@@ -1000,7 +1033,7 @@ export default function Home() {
               <Icon size={18} />
               <span>{label}</span>
               {label === "创作中心" && <span className="nav-indicator" />}
-              {label === "AI智能服务" && <span className="ai-pill">AI</span>}
+              {label === "智能客服" && <span className="ai-pill">AI</span>}
             </button>
           ))}
         </nav>
@@ -1015,14 +1048,13 @@ export default function Home() {
             </p>
             <small>MAKE SOMETHING GREAT</small>
           </div>
-          <button className="profile" onClick={() => navigate("设置")}>
-            <span className="profile-avatar">S</span>
+          <div className="profile">
+            <span className="profile-avatar">{Array.from(creatorName.trim())[0] || "S"}</span>
             <span>
-              <strong>Studio 创作者</strong>
+              <strong>{creatorName.trim() || "Studio 创作者"}</strong>
               <small>我的工作台</small>
             </span>
-            <Settings2 size={15} />
-          </button>
+          </div>
         </div>
       </aside>
       <div className="main-shell">
@@ -1047,25 +1079,20 @@ export default function Home() {
             <button
               className="icon-button"
               aria-label="使用说明"
-              onClick={() =>
-                setToast(
-                  "先采集热点，再点击第二步“内容创作”生成图片与文案；采集笔记可点击“以此改写”。",
-                )
-              }
+              onClick={() => navigate("智能客服")}
             >
               <CircleHelp size={18} />
             </button>
-            <span className="top-avatar">S</span>
+            <span className="top-avatar">{Array.from(creatorName.trim())[0] || "S"}</span>
           </div>
         </header>
         <main>
-          {libraryError && (
+          {libraryError && page !== "智能客服" && (page !== "创作中心" || creationStep !== "create" || studioPlatform !== "douyin") && (
             <div className="notice error-notice" role="alert">
               {libraryError}
             </div>
           )}
-          {page === "创作中心" ? (
-            <>
+          <div hidden={page !== "创作中心"}>
               <section className="page-heading">
                 <div>
                   <div className="eyebrow">CREATIVE WORKSPACE</div>
@@ -1075,7 +1102,9 @@ export default function Home() {
                   <p>
                     {creationStep === "collect"
                       ? "发现值得创作的内容，从捕捉每一个热点开始。"
-                      : "用一张好图、一段真诚的分享，让产品故事自然发生。"}
+                      : studioPlatform === "douyin"
+                        ? "从一条热点视频出发，把自己的想法写进口播和镜头。"
+                        : "用一张好图、一段真诚的分享，让产品故事自然发生。"}
                   </p>
                 </div>
                 <button
@@ -1091,7 +1120,7 @@ export default function Home() {
                 <button
                   type="button"
                   className={`workflow-button ${creationStep === "collect" ? "workflow-current" : "workflow-next"}`}
-                  onClick={() => setCreationStep("collect")}
+                  onClick={() => openCollection(creationStep === "create" ? studioPlatform : platform)}
                   aria-current={creationStep === "collect" ? "step" : undefined}
                 >
                   <span className="step-number">01</span>
@@ -1107,40 +1136,82 @@ export default function Home() {
                 <button
                   type="button"
                   className={`workflow-button ${creationStep === "create" ? "workflow-current" : "workflow-next"}`}
-                  onClick={() => openCreation()}
+                  onClick={() => openCreation(creationStep === "collect" ? platform : studioPlatform)}
                   aria-current={creationStep === "create" ? "step" : undefined}
                 >
                   <span className="step-number">02</span>
                   <div>
                     <strong>内容创作</strong>
-                    <small>图片生成 · 文案生成</small>
+                    <small>{(creationStep === "collect" ? platform : studioPlatform) === "douyin" ? "口播改写 · 拍摄脚本" : "图片生成 · 笔记文案"}</small>
                   </div>
                   {creationStep === "create" && (
                     <span className="current-dot">进行中</span>
                   )}
                 </button>
                 <div className="workflow-line" />
-                <div className="workflow-next">
+                <button type="button" className="workflow-button workflow-next" onClick={() => navigate("作品库")}>
                   <span className="step-number">03</span>
                   <div>
-                    <strong>创作汇总</strong>
-                    <small>沉淀你的好作品</small>
+                    <strong>作品库</strong>
+                    <small>查看已完成的作品</small>
                   </div>
-                </div>
+                </button>
               </div>
               <div hidden={creationStep !== "create"}>
-                <CreationStudio
-                  sources={creationSources}
-                  productImages={productImages}
-                  credentials={credentials}
-                  configured={dashscopeReady}
-                  initialSource={creationSource}
-                  launchId={creationLaunchId}
-                  onCopy={copyCreationText}
-                  onSaveImage={saveCreatedImage}
-                  onSaveNote={saveCreatedNote}
-                  onSettings={() => navigate("设置")}
-                />
+                <div className="studio-platforms" role="group" aria-label="内容创作平台">
+                  <span className="field-label">创作平台</span>
+                  <div className="platform-tabs">
+                    <button type="button" aria-pressed={studioPlatform === "xiaohongshu"}
+                      className={studioPlatform === "xiaohongshu" ? "selected" : ""}
+                      onClick={() => chooseStudio("xiaohongshu")}>
+                      <span className="xhs-logo" aria-hidden="true">小红书</span>
+                      <strong>小红书创作</strong><small>图文笔记</small>
+                    </button>
+                    <button type="button" aria-pressed={studioPlatform === "douyin"}
+                      className={studioPlatform === "douyin" ? "selected" : ""}
+                      onClick={() => chooseStudio("douyin")}>
+                      <span className="douyin-logo" aria-hidden="true">♪</span>
+                      <strong>抖音创作</strong><small>口播与分镜</small>
+                    </button>
+                  </div>
+                </div>
+                <div hidden={studioPlatform !== "xiaohongshu"}>
+                  {openedStudios.xiaohongshu && (
+                    <CreationStudio
+                      key={xhsEditorKey}
+                      sources={xhsSources}
+                      productImages={productImages.filter((image) => image.platform === "xiaohongshu")}
+                      savedWorks={Object.values(saved).filter((item) => item.platform === "xiaohongshu")}
+                      credentials={creationKeys}
+                      configured={qwenReady}
+                      initialSource={xhsSource}
+                      launchId={xhsLaunchId}
+                      onCopy={copyCreationText}
+                      onSaveImage={saveCreatedImage}
+                      onSaveNote={saveCreatedNote}
+                      creatorName={creatorName}
+                      onCreatorNameChange={accountName ? undefined : setLocalCreator}
+                    />
+                  )}
+                </div>
+                <div hidden={studioPlatform !== "douyin"}>
+                  {openedStudios.douyin && (
+                    <DouyinStudio
+                      items={collections.douyin.items}
+                      sourceId={douyinSourceId}
+                      onSourceChange={setDouyinSourceId}
+                      onTranscribe={getVoiceCopy}
+                      onCollect={() => openCollection("douyin")}
+                      onCopy={copyText}
+                      credentials={creationKeys}
+                      qwenReady={qwenReady}
+                      transcriptionReady={dashscopeReady}
+                      creatorName={creatorName}
+                      onCreatorNameChange={accountName ? undefined : setLocalCreator}
+                      onSave={saveCreatedScript}
+                    />
+                  )}
+                </div>
               </div>
               <div hidden={creationStep !== "collect"}>
                 <section className="search-panel">
@@ -1151,21 +1222,10 @@ export default function Home() {
                       </span>
                       <h2>寻找你的下一个创作灵感</h2>
                     </div>
-                    <div className="mode-switch" aria-label="数据模式">
-                      <button
-                        className={mode === "demo" ? "selected" : ""}
-                        onClick={() => changeMode("demo")}
-                      >
-                        演示预览
-                      </button>
-                      <button
-                        className={mode === "live" ? "selected" : ""}
-                        onClick={() => changeMode("live")}
-                      >
-                        <i className={tikhubReady ? "green-dot" : "gray-dot"} />
-                        实时采集
-                      </button>
-                    </div>
+                    <span className="collection-live-label">
+                      <i className={tikhubReady ? "green-dot" : "gray-dot"} />
+                      实时采集
+                    </span>
                   </div>
                   <div className="platform-row">
                     <span className="field-label">内容平台</span>
@@ -1211,7 +1271,7 @@ export default function Home() {
                       <Search size={19} />
                       <input
                         value={keyword}
-                        onChange={(e) => setKeyword(e.target.value)}
+                        onChange={(e) => updateCollection(platform, { keyword: e.target.value })}
                         maxLength={80}
                         placeholder="输入你感兴趣的关键词，例如：咖啡店运营"
                         aria-label="采集关键词"
@@ -1221,14 +1281,14 @@ export default function Home() {
                     <button
                       className="collect-button"
                       type="submit"
-                      disabled={loading}
+                      disabled={loading || !tikhubReady}
                     >
                       {loading ? (
                         <LoaderCircle size={17} className="spin" />
                       ) : (
                         <Sparkles size={17} />
                       )}{" "}
-                      {loading ? "正在采集…" : "开始采集"}
+                      {loading ? "正在采集…" : !tikhubReady ? "采集服务未连接" : "开始采集"}
                       {!loading && <ArrowRight size={16} />}
                     </button>
                   </form>
@@ -1241,22 +1301,17 @@ export default function Home() {
                       )
                         .slice(0, 3)
                         .map((value) => (
-                          <button key={value} onClick={() => setKeyword(value)}>
+                          <button key={value} onClick={() => updateCollection(platform, { keyword: value })}>
                             {value}
                             <Plus size={10} />
                           </button>
                         ))}
                     </div>
                     {platform === "douyin" ? (
-                      <label className="auto-transcribe">
-                        <input
-                          type="checkbox"
-                          checked={autoTranscribe}
-                          onChange={(e) => setAutoTranscribe(e.target.checked)}
-                        />
-                        <span>自动转写语音并纠错</span>
+                      <span className="search-note">
                         <AudioLines size={13} />
-                      </label>
+                        语音文案按作品手动获取
+                      </span>
                     ) : (
                       <span className="search-note">
                         <SlidersHorizontal size={13} />
@@ -1265,32 +1320,13 @@ export default function Home() {
                     )}
                   </div>
                 </section>
-                {mode === "demo" ? (
-                  <div className="demo-banner">
-                    <span>
-                      <span className="demo-tag">演示</span>
-                      {tikhubReady
-                        ? "当前展示示例内容，非平台实时数据。采集服务已配置，可切换至实时采集。"
-                        : "当前展示示例内容，非平台实时数据。配置 API 后，即可开启真实热点采集。"}
-                    </span>
-                    <button
-                      onClick={() =>
-                        tikhubReady ? changeMode("live") : navigate("设置")
-                      }
-                    >
-                      {tikhubReady ? "切换实时采集" : "配置服务"}
-                      <ArrowRight size={13} />
-                    </button>
-                  </div>
-                ) : (
-                  <div className="live-banner">
+                <div className="live-banner">
                     <span>
                       <ShieldCheck size={14} />
                       通过 TikHub 获取关键词搜索结果，按点赞排序展示最多 10 条。
                     </span>
-                    <span>语音识别：百炼 · 文本纠错：千问</span>
-                  </div>
-                )}
+                    {platform === "douyin" && <span>选定作品后可获取语音文案</span>}
+                </div>
                 {(error || warnings.length > 0) && (
                   <div
                     role="alert"
@@ -1307,7 +1343,7 @@ export default function Home() {
                     <div className="results-title">
                       <h2>灵感发现</h2>
                       <span className="result-count">{items.length}</span>
-                      <span className="result-keyword">“{resultKeyword}”</span>
+                      {resultKeyword && <span className="result-keyword">“{resultKeyword}”</span>}
                       {loading && (
                         <span className="loading-label">
                           <LoaderCircle size={13} className="spin" />
@@ -1317,7 +1353,7 @@ export default function Home() {
                     </div>
                     <div className="results-tools">
                       {(loading || activeJobs > 0) && (
-                        <button className="text-button" onClick={cancel}>
+                        <button className="text-button" onClick={() => cancel(platform)}>
                           取消{loading ? "采集" : "转写"}
                         </button>
                       )}
@@ -1348,7 +1384,7 @@ export default function Home() {
                         onClick={() => setFilter("saved")}
                       >
                         已收藏{" "}
-                        <span>{items.filter((x) => saved[x.id]).length}</span>
+                        <span>{items.filter((x) => saved[noteId(x)]).length}</span>
                       </button>
                     </div>
                     <span className="result-time">
@@ -1366,8 +1402,6 @@ export default function Home() {
                           })}{" "}
                           采集
                         </>
-                      ) : mode === "demo" ? (
-                        "示例内容 · 仅供预览"
                       ) : (
                         "等待采集"
                       )}
@@ -1388,12 +1422,13 @@ export default function Home() {
                         <h3>
                           {filter === "saved"
                             ? "还没有收藏灵感"
-                            : "好内容，从一次搜索开始"}
+                            : fetchedAt ? "没有找到匹配的作品" : "等待实时采集"}
                         </h3>
                         <p>
                           {filter === "saved"
                             ? "点击作品右侧的收藏图标，把喜欢的内容收进素材库。"
-                            : "选择一个平台，输入关键词，发现与你相关的热门内容。"}
+                            : fetchedAt ? "换一个关键词再试试。"
+                            : "选择平台，输入关键词后点击「开始采集」。"}
                         </p>
                       </div>
                     )}
@@ -1401,22 +1436,23 @@ export default function Home() {
                   {shown.length > 0 && (
                     <div className="list-end">
                       <span />
-                      已展示 {shown.length} 条
-                      {mode === "demo" ? "示例" : "采集"}
-                      内容 · 灵感正在发生
+                      已展示 {shown.length} 条采集内容
                       <span />
                     </div>
                   )}
                 </section>
               </div>
-            </>
-          ) : page === "设置" ? (
+          </div>
+          <div hidden={page !== "智能客服"}>
+            <SiteSupport credentials={creationKeys} configured={qwenReady} />
+          </div>
+          {page === "创作中心" || page === "智能客服" ? null : page === "设置" ? (
             <>
               <section className="page-heading">
                 <div>
                   <div className="eyebrow">WORKSPACE SETTINGS</div>
-                  <h1>连接你的创作服务</h1>
-                  <p>配置一次，开始探索真实的平台内容。</p>
+                  <h1>API 密钥管理</h1>
+                  <p>管理千问创作、热点采集和语音转写使用的密钥。</p>
                 </div>
                 <button
                   className="subtle-button"
@@ -1440,102 +1476,50 @@ export default function Home() {
                   <form
                     onSubmit={(e) => {
                       e.preventDefault();
-                      cancel();
+                      cancel("douyin");
+                      cancel("xiaohongshu");
                       setCredentials({
                         tikhubKey: draftKeys.tikhubKey?.trim(),
                         dashscopeKey: draftKeys.dashscopeKey?.trim(),
+                        qwenKey: draftKeys.qwenKey?.trim(),
                       });
-                      setToast("配置已应用到本次会话，采集时将验证服务");
-                      setError("");
+                      setToast("密钥已应用到本次会话。");
+                      updateCollection("douyin", { error: "" });
+                      updateCollection("xiaohongshu", { error: "" });
                     }}
                   >
-                    <div className="setting-field">
-                      <div>
-                        <label htmlFor="tikhub-key">TikHub API Key</label>
-                        <span
-                          className={`service-badge ${tikhubReady ? "ready" : ""}`}
-                        >
-                          {config.tikhubConfigured
-                            ? "服务器已配置"
-                            : credentials.tikhubKey
-                              ? "本次会话已配置"
-                              : "待配置"}
-                        </span>
-                      </div>
-                      <p>用于获取抖音、小红书的关键词搜索结果与作品详情。</p>
-                      <input
-                        id="tikhub-key"
-                        type="password"
-                        autoComplete="off"
-                        spellCheck={false}
-                        value={draftKeys.tikhubKey || ""}
-                        onChange={(e) =>
-                          setDraftKeys({
-                            ...draftKeys,
-                            tikhubKey: e.target.value,
-                          })
-                        }
-                        placeholder={
-                          config.tikhubConfigured
-                            ? "服务器已配置，可留空使用"
-                            : "输入 TikHub API Key"
-                        }
-                      />
-                      <a
-                        href="https://tikhub.io"
-                        target="_blank"
-                        rel="noopener noreferrer"
-                      >
-                        前往 TikHub 获取密钥
-                        <ExternalLink size={12} />
-                      </a>
-                    </div>
-                    <div className="setting-field">
-                      <div>
-                        <label htmlFor="dashscope-key">
-                          阿里云百炼 API Key
-                        </label>
-                        <span
-                          className={`service-badge ${dashscopeReady ? "ready" : ""}`}
-                        >
-                          {config.dashscopeConfigured
-                            ? "服务器已配置"
-                            : credentials.dashscopeKey
-                              ? "本次会话已配置"
-                              : "待配置"}
-                        </span>
-                      </div>
-                      <p>
-                        用于视频语音转文字，以及使用千问纠正错别字（中国内地 ·
-                        北京地域）。
-                      </p>
-                      <input
-                        id="dashscope-key"
-                        type="password"
-                        autoComplete="off"
-                        spellCheck={false}
-                        value={draftKeys.dashscopeKey || ""}
-                        onChange={(e) =>
-                          setDraftKeys({
-                            ...draftKeys,
-                            dashscopeKey: e.target.value,
-                          })
-                        }
-                        placeholder={
-                          config.dashscopeConfigured
-                            ? "服务器已配置，可留空使用"
-                            : "输入百炼 API Key"
-                        }
-                      />
-                      <a
-                        href="https://bailian.console.aliyun.com/"
-                        target="_blank"
-                        rel="noopener noreferrer"
-                      >
-                        前往阿里云百炼控制台
-                        <ExternalLink size={12} />
-                      </a>
-                    </div>
+                    {keyFields.map(({ key, flag, id, label, description, url, link }) => {
+                      const fallback = key === "qwenKey" && dashscopeReady;
+                      const status = credentials[key] ? "本次会话已配置"
+                        : config[flag] ? "服务器已配置"
+                        : fallback ? "使用百炼密钥" : "待配置";
+                      return (
+                        <div className="setting-field" key={key}>
+                          <div>
+                            <label htmlFor={id}>{label}</label>
+                            <span className={`service-badge ${status === "待配置" ? "" : "ready"}`}>{status}</span>
+                          </div>
+                          <p id={`${id}-hint`}>{description}</p>
+                          <input
+                            id={id}
+                            type="password"
+                            autoComplete="off"
+                            spellCheck={false}
+                            maxLength={2048}
+                            aria-describedby={`${id}-hint`}
+                            value={draftKeys[key] || ""}
+                            onChange={(event) => {
+                              const value = event.target.value;
+                              setDraftKeys((previous) => ({ ...previous, [key]: value }));
+                            }}
+                            placeholder={config[flag] ? "服务器已配置，可留空使用" : `输入 ${label}`}
+                          />
+                          <a href={url} target="_blank" rel="noopener noreferrer">
+                            {link} <ExternalLink size={12} />
+                          </a>
+                        </div>
+                      );
+                    })}
                     <div className="settings-actions">
                       <button className="collect-button" type="submit">
                         <Check size={16} />
@@ -1545,7 +1529,8 @@ export default function Home() {
                         type="button"
                         className="subtle-button"
                         onClick={() => {
-                          cancel();
+                          cancel("douyin");
+                          cancel("xiaohongshu");
                           setCredentials({});
                           setDraftKeys({});
                           setToast("本次会话密钥已清除");
@@ -1566,8 +1551,8 @@ export default function Home() {
                   <h4>开始前的准备</h4>
                   <ol>
                     <li>开通 TikHub 并获取 API Key</li>
-                    <li>开通百炼语音识别与千问服务</li>
-                    <li>应用配置，切换至“实时采集”</li>
+                    <li>在百炼开通所需的千问或语音识别模型</li>
+                    <li>填写所需密钥，点击“应用配置”</li>
                   </ol>
                   <p className="hint">
                     采集和转写会按服务商规则产生用量。服务是否可用，以实际请求结果为准。
@@ -1671,111 +1656,21 @@ export default function Home() {
                 </div>
               )}
             </>
-          ) : page === "AI智能服务" ? (
-            <>
-              <section className="page-heading">
-                <div>
-                  <div className="eyebrow">CREATIVE INTELLIGENCE</div>
-                  <h1>给创作，多一点助力</h1>
-                  <p>从内容采集到语音文案，让灵感更快落地。</p>
-                </div>
-                <button
-                  className="subtle-button"
-                  onClick={() => navigate("设置")}
-                >
-                  <Settings2 size={15} />
-                  配置服务
-                </button>
-              </section>
-              <div className="service-grid">
-                {[
-                  {
-                    title: "热点内容采集",
-                    desc: "通过 TikHub 获取抖音、小红书关键词相关内容，整理标题、文案与互动数据。",
-                    icon: Flame,
-                    ready: tikhubReady,
-                    tag: "TikHub",
-                  },
-                  {
-                    title: "视频语音转写",
-                    desc: "使用阿里云百炼识别视频中的语音，自动整理为可阅读、可复制的文本。",
-                    icon: AudioLines,
-                    ready: dashscopeReady,
-                    tag: "阿里云百炼",
-                  },
-                  {
-                    title: "文案错字纠正",
-                    desc: "使用通义千问校正语音识别中的错别字和标点，保留原始表达与语义。",
-                    icon: WandSparkles,
-                    ready: dashscopeReady,
-                    tag: "通义千问",
-                  },
-                ].map(({ title, desc, icon: Icon, ready, tag }) => (
-                  <article key={title} className="service-card">
-                    <span className="service-icon">
-                      <Icon size={24} />
-                    </span>
-                    <span className={`service-badge ${ready ? "ready" : ""}`}>
-                      {ready ? "已配置" : "待配置"}
-                    </span>
-                    <h3>{title}</h3>
-                    <p>{desc}</p>
-                    <div>
-                      <span>{tag}</span>
-                      <button
-                        onClick={() => navigate(ready ? "创作中心" : "设置")}
-                      >
-                        {ready ? "开始使用" : "去配置"}
-                        <ArrowRight size={14} />
-                      </button>
-                    </div>
-                  </article>
-                ))}
-              </div>
-            </>
           ) : (
-            <>
-              <section className="page-heading">
-                <div>
-                  <div className="eyebrow">
-                    {page === "产品资料库"
-                      ? "PRODUCT KNOWLEDGE"
-                      : "CREATION OVERVIEW"}
-                  </div>
-                  <h1>{page}</h1>
-                  <p>让创作流程更完整，让每一份内容都有迹可循。</p>
-                </div>
-              </section>
-              <div className="empty-state full-empty">
-                <span className="empty-art">
-                  {page === "产品资料库" ? (
-                    <Boxes size={38} />
-                  ) : (
-                    <LayoutDashboard size={38} />
-                  )}
-                </span>
-                <span className="coming-label">后续开放</span>
-                <h3>
-                  {page === "产品资料库"
-                    ? "产品知识，是好内容的起点"
-                    : "每一份好作品，都值得被记录"}
-                </h3>
-                <p>
-                  {page === "产品资料库"
-                    ? "这里将用于整理品牌介绍、产品卖点与创作参考资料。"
-                    : "这里将用于管理创作记录、内容状态与成品归档。"}
-                  <br />
-                  已开放热点采集、图片生成、文案创作与资料保存。
-                </p>
-                <button
-                  className="collect-button"
-                  onClick={() => navigate("创作中心")}
-                >
-                  前往创作中心
-                  <ArrowRight size={15} />
-                </button>
-              </div>
-            </>
+            <WorksLibrary
+              works={works}
+              ready={worksReady}
+              error={worksError}
+              onCreate={(target: Platform) => {
+                if (target === "douyin") {
+                  setDouyinSourceId("");
+                } else {
+                  setXhsSource(null);
+                  setXhsEditorKey((key) => key + 1);
+                }
+                openCreation(target);
+              }}
+            />
           )}
           <footer className="workspace-footer">
             <span>灵感 Studio</span>
@@ -1832,11 +1727,11 @@ export default function Home() {
                 </span>
                 {selected.author}
                 <button
-                  className={`subtle-button ${saved[selected.id] ? "saved" : ""}`}
+                  className={`subtle-button ${saved[noteId(selected)] ? "saved" : ""}`}
                   onClick={() => saveItem(selected)}
                 >
                   <Bookmark size={14} />
-                  {saved[selected.id] ? "已收藏" : "收藏素材"}
+                  {saved[noteId(selected)] ? "已收藏" : "收藏素材"}
                 </button>
               </div>
               <div className="detail-metrics">
@@ -1868,10 +1763,15 @@ export default function Home() {
                     <button
                       className="text-button"
                       disabled={!selected.content.trim()}
-                      onClick={() => openCreation(selected)}
+                      onClick={() => openCreation("xiaohongshu", selected)}
                     >
                       <WandSparkles size={13} />
                       以此改写
+                    </button>
+                  )}
+                  {selected.platform === "douyin" && collections.douyin.items.some((source) => source.id === selected.id) && (
+                    <button className="text-button" onClick={() => openCreation("douyin", selected)}>
+                      <WandSparkles size={13} /> 引用到抖音创作
                     </button>
                   )}
                   <button
@@ -1934,23 +1834,6 @@ export default function Home() {
                   </div>
                 </>
               )}
-              {selected.platform === "douyin" && transcriptView(selected)}
-              {selected.platform === "douyin" &&
-                selected.transcript?.status === "done" && (
-                  <button
-                    className="subtle-button copy-transcript"
-                    onClick={() =>
-                      copyText(
-                        selected.transcript?.correctedText ||
-                          selected.transcript?.rawText ||
-                          "",
-                      )
-                    }
-                  >
-                    <Copy size={14} />
-                    复制语音文案
-                  </button>
-                )}
               {!selected.demo && safeUrl(selected.url) ? (
                 <a
                   className="original-link"
@@ -1958,7 +1841,7 @@ export default function Home() {
                   target="_blank"
                   rel="noopener noreferrer"
                 >
-                  打开平台原文
+                  {selected.platform === "douyin" ? "查看抖音作品" : "打开平台原文"}
                   <ExternalLink size={15} />
                 </a>
               ) : (
@@ -1968,6 +1851,17 @@ export default function Home() {
                     : "平台未返回可用原文链接。"}
                 </p>
               )}
+              {selected.platform === "douyin" && transcriptView(selected)}
+              {selected.platform === "douyin" &&
+                selected.transcript?.status === "done" &&
+                (selected.transcript.correctedText?.trim() || selected.transcript.rawText?.trim()) && (
+                  <button
+                    className="subtle-button copy-transcript"
+                    onClick={() => copyText(selected.transcript?.correctedText?.trim() || selected.transcript?.rawText?.trim() || "")}
+                  >
+                    <Copy size={14} /> 复制语音文案
+                  </button>
+                )}
             </div>
           </section>
         </div>

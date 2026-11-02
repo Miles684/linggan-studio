@@ -39,6 +39,7 @@ function load(relative) {
 }
 
 const { generateCopy } = load("lib/server/create-copy.ts");
+const { countCharacters, noteFormatError } = load("lib/note-format.ts");
 const { POST } = load("app/api/create/copy/route.ts");
 const key = "test-only-copy-key";
 const input = { mode: "idea", idea: "和朋友分享一款 350ml 的白色陶瓷杯" };
@@ -49,10 +50,10 @@ const source = {
   url: "https://www.xiaohongshu.com/explore/note-123",
 };
 const copy = {
-  title: "给朋友的杯子挑选清单",
+  title: "给朋友的杯子挑选清单☕",
   content:
-    "想和你分享这款白色陶瓷杯。\n350ml 的容量，可以先看看是否适合自己的饮水习惯。",
-  tags: ["日常分享", "杯子"],
+    "想和你分享这款白色陶瓷杯。\n350ml 的容量，可以先看看是否适合自己的饮水习惯。☕",
+  tags: ["日常分享", "杯子", "挑选指南", "陶瓷杯", "生活好物"],
 };
 const response = (value, init) =>
   new Response(JSON.stringify(value), {
@@ -141,6 +142,28 @@ test("rewrite treats original experience as reference and accepts explicit creat
   assert.equal(result.warnings, undefined);
 });
 
+test("revision sends the current editable draft, feedback, original source and creator's facts in one request", async () => {
+  const draft = { ...copy, title: "手动改过的标题", tags: ["未完成的标签"] };
+  const feedback = "把第二段改成关于容量的问题，并修复标题和标签。";
+  let calls = 0;
+  const result = await generateCopy({
+    mode: "rewrite", source, requirements: "围绕容量", experience: "我用它喝水。",
+    revision: { feedback, draft: { ...draft, model: "ignored" }, system: "ignored" },
+  }, key, async (_url, init) => {
+    calls++;
+    const [system, data] = JSON.parse(init.body).messages;
+    assert.match(system.content, /逐条落实 revision.feedback/);
+    const brief = JSON.parse(data.content);
+    assert.deepEqual(brief.revision, { feedback, draft });
+    assert.deepEqual(brief.source, source);
+    assert.equal(brief.requirements, "围绕容量");
+    assert.equal(brief.experience, "我用它喝水。");
+    return completion();
+  });
+  assert.equal(calls, 1);
+  assert.deepEqual(result.tags, copy.tags);
+});
+
 test("no-experience rewrite rejects the observed fabricated coffee visit without retrying", async () => {
   const body = {
     mode: "rewrite",
@@ -191,6 +214,7 @@ test("no-experience rewrite rejects the observed fabricated coffee visit without
 test("clear past use claims are blocked even when hidden in tags or original reference", async () => {
   for (const content of [
     "我已经用过这款杯子。",
+    "☕亲测好用，可以看看。",
     "我昨天去了这家店。",
     "我在这里坐了半小时。",
     "我没想到用了三天就喜欢上了。",
@@ -243,7 +267,7 @@ test("recommendations, future plans, hypothetical and negated use remain valid",
   assert.equal(result.content, content);
 });
 
-test("only trailing whole lines made of returned tags are removed", async () => {
+test("trailing copies of returned tags are stripped, other in-body hashtags are rejected", async () => {
   for (const suffix of [
     "\n\n#日常分享 #杯子",
     "\n＃日常分享\n#杯子\n",
@@ -261,10 +285,8 @@ test("only trailing whole lines made of returned tags are removed", async () => 
     copy.content + "\n可以看看 #日常分享 #杯子",
     copy.content + "\n#日常分享 也需要核对容量",
   ]) {
-    const result = await generateCopy(input, key, async () =>
-      completion({ ...copy, content }),
-    );
-    assert.equal(result.content, content);
+    await assert.rejects(generateCopy(input, key, async () =>
+      completion({ ...copy, content })), (error) => error.code === "INVALID_COPY_RESULT");
   }
   await assert.rejects(
     generateCopy(input, key, async () =>
@@ -338,6 +360,9 @@ test("invalid or excessive inputs are rejected before making a paid request", as
     { ...input, requirements: "字".repeat(2001) },
     { ...input, experience: "字".repeat(4001) },
     { ...input, experience: {} },
+    { ...input, revision: { draft: copy, feedback: "  " } },
+    { ...input, revision: { feedback: "重写", draft: { ...copy, tags: "错" } } },
+    { ...input, revision: { draft: { ...copy, content: "字".repeat(12001) }, feedback: "重写" } },
     { mode: "rewrite" },
     { mode: "rewrite", source: [] },
     { mode: "rewrite", source: { ...source, content: " " } },
@@ -377,6 +402,9 @@ test("output fields are validated, no empty or malformed result is returned as s
     {},
     { ...copy, title: " " },
     { ...copy, title: "字".repeat(41) },
+    { ...copy, title: "字".repeat(20) + "☕" },
+    { ...copy, title: "缺少表情" },
+    { ...copy, title: "两个表情☕🪻" },
     { ...copy, content: "" },
     { ...copy, content: 5 },
     { ...copy, content: "字".repeat(2001) },
@@ -387,6 +415,8 @@ test("output fields are validated, no empty or malformed result is returned as s
     { ...copy, tags: ["#"] },
     { ...copy, tags: ["字".repeat(31)] },
     { ...copy, tags: ["第一行\n第二行"] },
+    { ...copy, tags: copy.tags.slice(1) },
+    { ...copy, tags: ["杯子", "好物", "选购", "挑选", "#杯子"] },
   ];
   for (const value of invalid)
     await assert.rejects(
@@ -415,19 +445,41 @@ test("output fields are validated, no empty or malformed result is returned as s
     );
 });
 
-test("valid output is bounded, strips topic hash prefixes and removes duplicates", async () => {
+test("limits use user-visible graphemes, and tag prefixes are stripped before validation", async () => {
+  const title = "字".repeat(19) + "👩🏽‍💻";
+  const content = ("字".repeat(39) + "🇨🇳").repeat(50);
   const result = await generateCopy(input, key, async () =>
     completion({
-      title: "字".repeat(40),
-      content: "字".repeat(2000),
-      tags: [" #话题 ", "＃第二个", "话题"],
+      title, content,
+      tags: [" #话题 ", "＃第二个", "话题三", "话题四", "话题五"],
       ignored: "extra",
     }),
   );
-  assert.equal(result.title.length, 40);
-  assert.equal(result.content.length, 2000);
-  assert.deepEqual(result.tags, ["话题", "第二个"]);
+  assert.equal(countCharacters(result.title), 20);
+  assert.equal(countCharacters(result.content), 2000);
+  assert.equal(result.content, content);
+  assert.deepEqual(result.tags, ["话题", "第二个", "话题三", "话题四", "话题五"]);
   assert.equal(result.ignored, undefined);
+});
+
+test("body emoji spacing is repaired at punctuation and word boundaries without changing wording or retrying", async () => {
+  let calls = 0;
+  const text = "甲".repeat(32) + "，" + "乙".repeat(40) + "\n" + "丙".repeat(29);
+  const result = await generateCopy(input, key, async () => {
+    calls++;
+    return completion({ ...copy, content: "🧑🏾‍🍳" + text });
+  });
+  assert.equal(calls, 1);
+  assert.equal(noteFormatError(result.title, result.content, result.tags), "");
+  assert.equal(result.content.replaceAll("🧑🏾‍🍳", "").replaceAll("✨", ""), text);
+  assert.ok(result.content.includes("，🧑🏾‍🍳"));
+  for (const n of [30, 40]) {
+    assert.equal(noteFormatError(copy.title, "字".repeat(n) + "2️⃣", copy.tags), "");
+    assert.ok(noteFormatError(copy.title, "字".repeat(n), copy.tags));
+  }
+  assert.equal(noteFormatError(copy.title, "甲".repeat(29), copy.tags), "");
+  assert.ok(noteFormatError(copy.title, "甲".repeat(29) + "✨", copy.tags));
+  assert.ok(noteFormatError(copy.title, "甲".repeat(41) + "✨", copy.tags));
 });
 
 test("provider failures use safe messages and never echo secrets", async () => {
@@ -544,7 +596,7 @@ test("the 90 second deadline aborts a stalled provider request", async (context)
   assert.equal(signal.aborted, true);
 });
 
-test("copy route accepts long Chinese references with its 80KB limit and no-store response", async () => {
+test("copy route accepts long Chinese references and editable revision drafts within its 144 KB limit", async () => {
   const originalFetch = globalThis.fetch;
   let calls = 0;
   globalThis.fetch = async () => {
@@ -566,7 +618,9 @@ test("copy route accepts long Chinese references with its 80KB limit and no-stor
       make({
         mode: "rewrite",
         source: { ...source, content: "字".repeat(10000) },
-        credentials: { dashscopeKey: key },
+        requirements: "字".repeat(2000), experience: "字".repeat(4000),
+        revision: { draft: { ...copy, content: "字".repeat(12000) }, feedback: "字".repeat(2000) },
+        credentials: { qwenKey: key },
       }),
     );
     assert.equal(result.status, 200);
@@ -577,7 +631,7 @@ test("copy route accepts long Chinese references with its 80KB limit and no-stor
       make(input, { Origin: "https://evil.test" }),
     );
     assert.equal(invalidOrigin.status, 403);
-    const excessive = await POST(make({ ...input, idea: "a".repeat(80000) }));
+    const excessive = await POST(make({ ...input, idea: "a".repeat(144000) }));
     assert.equal(excessive.status, 413);
     assert.equal(calls, 1);
   } finally {

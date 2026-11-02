@@ -274,9 +274,13 @@ nav .settings-nav {
 }
 .profile > span:nth-child(2) {
   flex: 1;
+  min-width: 0;
   text-align: left;
 }
 .profile strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-size: 11px;
   font-weight: 600;
   display: block;
@@ -521,27 +525,16 @@ h1 > span {
   letter-spacing: 0.2px;
   font-weight: 600;
 }
-.mode-switch {
-  background: #f6f7f3;
-  border: 1px solid #eceee6;
-  border-radius: 6px;
-  display: flex;
-  padding: 3px;
-  gap: 2px;
-}
-.mode-switch button {
-  font-size: 10px;
-  color: #91978a;
-  padding: 6px 9px;
-  border-radius: 4px;
-  display: flex;
+.collection-live-label {
+  display: inline-flex;
   align-items: center;
-  gap: 5px;
-}
-.mode-switch .selected {
-  background: #fff;
-  box-shadow: 0 1px 3px #22331e12;
-  color: #5a6852;
+  gap: 7px;
+  padding: 5px 10px;
+  border-radius: 6px;
+  background: #f0f4ec;
+  color: #536b49;
+  font-size: 12px;
+  white-space: nowrap;
 }
 .green-dot,
 .gray-dot {
@@ -558,6 +551,17 @@ h1 > span {
   align-items: center;
   gap: 22px;
   margin-bottom: 18px;
+}
+.studio-platforms {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin: 0 0 20px;
+}
+@media (max-width: 620px) {
+  .studio-platforms { align-items: stretch; flex-direction: column; gap: 8px; }
+  .studio-platforms .platform-tabs { display: flex; }
+  .studio-platforms .platform-tabs button { flex: 1; min-width: 0; }
 }
 .field-label {
   font-size: 11px;
@@ -723,21 +727,13 @@ h1 > span {
 .suggestions button:hover {
   background: #edf2e6;
 }
-.search-note,
-.auto-transcribe {
+.search-note {
   font-size: 9px;
   color: #a3a997;
   display: flex;
   align-items: center;
   gap: 5px;
 }
-.auto-transcribe {
-  cursor: pointer;
-}
-.auto-transcribe input {
-  accent-color: #78955f;
-}
-.demo-banner,
 .live-banner {
   display: flex;
   align-items: center;
@@ -748,7 +744,6 @@ h1 > span {
   gap: 15px;
   line-height: 1.7;
 }
-.demo-banner > span,
 .live-banner > span {
   display: flex;
   align-items: center;
@@ -763,14 +758,6 @@ h1 > span {
   padding: 0px 5px;
   border-radius: 3px;
   white-space: nowrap;
-}
-.demo-banner button {
-  display: flex;
-  gap: 5px;
-  align-items: center;
-  font-size: 10px;
-  white-space: nowrap;
-  color: #b39060;
 }
 .live-banner {
   color: #839379;
@@ -1423,62 +1410,6 @@ h1 > span {
   flex-direction: column;
   gap: 12px;
 }
-.service-grid {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 18px;
-}
-.service-card {
-  padding: 25px;
-  background: #fff;
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  position: relative;
-}
-.service-icon {
-  width: 44px;
-  height: 44px;
-  display: grid;
-  place-items: center;
-  background: #f0f4e9;
-  color: #8ca374;
-  border-radius: 11px;
-}
-.service-card > .service-badge {
-  position: absolute;
-  right: 20px;
-  top: 27px;
-}
-.service-card h3 {
-  font-size: 15px;
-  margin-top: 24px;
-  font-weight: 550;
-  color: #677d54;
-}
-.service-card > p {
-  font-size: 11px;
-  line-height: 1.9;
-  color: #a1ac95;
-  margin-top: 12px;
-  min-height: 64px;
-}
-.service-card > div {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  border-top: 1px solid var(--border);
-  margin-top: 25px;
-  padding-top: 17px;
-  font-size: 10px;
-  color: #a0ad92;
-}
-.service-card button {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 10px;
-  color: #8a9f72;
-}
 .drawer-layer {
   position: fixed;
   inset: 0;
@@ -1847,20 +1778,6 @@ h1 > span {
   .settings-card {
     padding: 22px;
   }
-  .service-grid {
-    gap: 12px;
-  }
-  .service-card {
-    padding: 21px;
-  }
-  .service-card > .service-badge {
-    position: static;
-    display: inline-block;
-    margin-top: 13px;
-  }
-  .service-card h3 {
-    margin-top: 16px;
-  }
   .page-heading h1 {
     font-size: 23px;
   }
@@ -1943,9 +1860,6 @@ h1 > span {
     height: 25px;
     font-size: 10px;
   }
-  .demo-banner {
-    font-size: 9px;
-  }
   .card-title {
     font-size: 12px;
   }
@@ -1991,20 +1905,6 @@ h1 > span {
   }
   .settings-guide {
     display: none;
-  }
-  .service-grid {
-    grid-template-columns: 1fr;
-  }
-  .service-card {
-    display: block;
-  }
-  .service-card > .service-badge {
-    position: absolute;
-    right: 24px;
-    top: 17px;
-  }
-  .service-card > p {
-    min-height: 0;
   }
   .result-keyword {
     font-size: 10px;
@@ -2143,14 +2043,6 @@ h1 > span {
   .small-icon > svg {
     width: 15px;
   }
-  .mode-switch {
-    padding: 2px;
-  }
-  .mode-switch button {
-    font-size: 8px;
-    padding: 5px 6px;
-    gap: 3px;
-  }
   .platform-row {
     gap: 12px;
     margin-bottom: 14px;
@@ -2231,22 +2123,6 @@ h1 > span {
   }
   .search-note {
     display: none;
-  }
-  .demo-banner {
-    font-size: 9px;
-    align-items: flex-start;
-    padding-top: 12px;
-    padding-bottom: 13px;
-    gap: 9px;
-  }
-  .demo-banner > span {
-    align-items: flex-start;
-    gap: 5px;
-  }
-  .demo-banner button {
-    font-size: 9px;
-    margin-top: 1px;
-    gap: 3px;
   }
   .demo-tag {
     font-size: 7px;
@@ -2465,9 +2341,6 @@ h1 > span {
   .settings-actions .subtle-button {
     font-size: 10px;
   }
-  .service-card {
-    padding: 23px;
-  }
   .full-empty {
     min-height: 390px;
     padding: 40px 20px;
@@ -2529,16 +2402,11 @@ nav button {
 .platform-tabs small {
   font-size: 10px;
 }
-.mode-switch button {
-  font-size: 11px;
-}
 .suggestions,
 .suggestions button,
-.search-note,
-.auto-transcribe {
+.search-note {
   font-size: 11px;
 }
-.demo-banner,
 .live-banner {
   font-size: 11px;
 }
@@ -2590,8 +2458,7 @@ nav button {
 }
 .setting-field p,
 .settings-title p,
-.settings-guide p,
-.service-card > p {
+.settings-guide p {
   font-size: 12px;
 }
 .setting-field > a,
@@ -2637,9 +2504,6 @@ nav button {
   .section-label h2 {
     font-size: 12px;
   }
-  .mode-switch button {
-    font-size: 10px;
-  }
   .search-panel-top {
     flex-wrap: wrap;
     gap: 12px;
@@ -2656,14 +2520,7 @@ nav button {
   .suggestions button {
     font-size: 10px;
   }
-  .auto-transcribe {
-    font-size: 11px;
-  }
-  .demo-banner,
   .live-banner {
-    font-size: 10px;
-  }
-  .demo-banner button {
     font-size: 10px;
   }
   .card-title {
@@ -2775,12 +2632,10 @@ nav button {
 .subtle-button,
 .text-button,
 .collect-button,
-.mode-switch button,
 .export-button,
 .card-actions button,
 .card-actions a,
-.suggestions button,
-.demo-banner button {
+.suggestions button {
   font-size: 13px;
 }
 .collect-button {
@@ -2807,11 +2662,9 @@ nav button {
   font-size: 16px;
 }
 .suggestions,
-.search-note,
-.auto-transcribe {
+.search-note {
   font-size: 12px;
 }
-.demo-banner,
 .live-banner {
   font-size: 12px;
 }
@@ -2919,8 +2772,7 @@ nav button {
 }
 .setting-field p,
 .settings-title p,
-.settings-guide p,
-.service-card > p {
+.settings-guide p {
   font-size: 13px;
 }
 .setting-field > a,
@@ -2929,21 +2781,8 @@ nav button {
 .settings-guide h4 {
   font-size: 12px;
 }
-.settings-guide h3,
-.service-card h3 {
+.settings-guide h3 {
   font-size: 16px;
-}
-.service-card > div,
-.service-card button {
-  font-size: 13px;
-}
-.service-card > .service-badge {
-  position: static;
-  display: inline-block;
-  margin-top: 15px;
-}
-.service-card > p {
-  min-height: 90px;
 }
 .empty-state p,
 .loading-state p {
@@ -3058,9 +2897,6 @@ nav button {
   .metrics small {
     font-size: 11px;
   }
-  .service-card > p {
-    min-height: 0;
-  }
 }
 @media (max-width: 760px) {
   .breadcrumb,
@@ -3079,10 +2915,6 @@ nav button {
   }
   .section-label h2 {
     font-size: 15px;
-  }
-  .mode-switch button {
-    font-size: 13px;
-    padding: 7px 10px;
   }
   .platform-row {
     flex-direction: column;
@@ -3128,21 +2960,12 @@ nav button {
     row-gap: 8px;
   }
   .suggestions,
-  .suggestions button,
-  .auto-transcribe {
+  .suggestions button {
     font-size: 12px;
   }
-  .demo-banner,
   .live-banner {
     font-size: 12px;
     line-height: 1.8;
-  }
-  .demo-banner {
-    flex-wrap: wrap;
-  }
-  .demo-banner button {
-    font-size: 13px;
-    margin-left: auto;
   }
   .demo-tag {
     font-size: 11px;
@@ -3308,9 +3131,6 @@ nav button {
     flex-wrap: wrap;
   }
   .setting-field input {
-    font-size: 14px;
-  }
-  .service-card > p {
     font-size: 14px;
   }
   .empty-state p,

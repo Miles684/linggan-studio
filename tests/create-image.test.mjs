@@ -57,10 +57,13 @@ const done = (url = OUTPUT) =>
       choices: [{ message: { role: "assistant", content: [{ image: url }] } }],
     },
   });
-const textRequest = {
-  mode: "text",
-  prompt: "一张咖啡产品图",
-  size: "1024*1024",
+const optimizeRequest = {
+  mode: "optimize",
+  images: [png],
+  prompt: "把产品图的背景调成米白色",
+  resolution: "1K",
+  originalWidth: 1,
+  originalHeight: 1,
 };
 const refRequest = (images) => ({
   mode: "reference",
@@ -68,8 +71,8 @@ const refRequest = (images) => ({
   size: "768*1024",
 });
 
-test("text generation submits fixed model and async endpoint without references", async () => {
-  const result = await submitImage(textRequest, KEY, async (url, init) => {
+test("optimization submits one effect image and its editing prompt to the async endpoint", async () => {
+  const result = await submitImage(optimizeRequest, KEY, async (url, init) => {
     assert.equal(
       url,
       "https://dashscope.aliyuncs.com/api/v1/services/aigc/image-generation/generation",
@@ -81,7 +84,7 @@ test("text generation submits fixed model and async endpoint without references"
     const body = JSON.parse(init.body);
     assert.equal(body.model, "qwen-image-2.1-pro");
     assert.deepEqual(body.input.messages, [
-      { role: "user", content: [{ text: textRequest.prompt }] },
+      { role: "user", content: [{ image: png }, { text: optimizeRequest.prompt }] },
     ]);
     assert.deepEqual(body.parameters, {
       n: 1,
@@ -96,6 +99,31 @@ test("text generation submits fixed model and async endpoint without references"
     status: "pending",
     model: IMAGE_MODEL,
   });
+});
+
+test("optimization uses source proportions and scales the pixel budget for each resolution", async () => {
+  const landscape = "data:image/webp;base64,UklGRmIAAABXRUJQVlA4IFYAAABQBgCdASqgAFoAPm02mUmkIyKhIIgAgA2JaW7hdJAAVnYi8QVHPbEXiCo57Yi8QVHPbEXiCo57Yi7sAAD+/r8r/+KHmt7B3J/4Nkimwmyip6hAAAAAAA==";
+  const portrait = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAkAAAAQCAIAAABLKsIUAAAACXBIWXMAAAPoAAAD6AG1e1JrAAAAFUlEQVQYlWPQcUnDhRhG5XQGe7gAADtHeGENZ259AAAAAElFTkSuQmCC";
+  for (const [image, width, height] of [[landscape, 1920, 1080], [portrait, 1080, 1920]]) {
+    for (const [resolution, budget] of [["1K", 1024 ** 2], ["2K", 2048 ** 2]]) {
+      const request = { ...optimizeRequest, images: [image], resolution, originalWidth: width, originalHeight: height };
+      await submitImage(request, KEY, async (_url, init) => {
+        const [w, h] = JSON.parse(init.body).parameters.size.split("*").map(Number);
+        assert.equal(w * height, h * width);
+        assert.ok(w * h <= budget && w * h >= budget * 0.95);
+        return queued();
+      });
+    }
+  }
+});
+
+test("reference creation forwards both new widescreen aspect ratios", async () => {
+  for (const size of ["1280*720", "720*1280"]) {
+    await submitImage({ ...refRequest([png, png]), size }, KEY, async (_url, init) => {
+      assert.equal(JSON.parse(init.body).parameters.size, size);
+      return queued();
+    });
+  }
 });
 
 test("ten references preserve original order and use exact server-owned prompt", async () => {
@@ -134,10 +162,19 @@ test("reference count outside 2–10, client prompt and model overrides are reje
     refRequest([png]),
     refRequest(Array(11).fill(png)),
     { ...refRequest([png, png]), prompt: "override" },
-    { ...textRequest, model: "other-model" },
-    { ...textRequest, n: 6 },
-    { ...textRequest, mode: "unknown" },
-    { ...textRequest, size: "2048*2048" },
+    { ...optimizeRequest, model: "other-model" },
+    { ...optimizeRequest, n: 6 },
+    { ...optimizeRequest, mode: "unknown" },
+    { ...optimizeRequest, size: "2048*2048" },
+    { ...optimizeRequest, images: [png, png] },
+    { ...optimizeRequest, resolution: "8K" },
+    { ...optimizeRequest, originalWidth: 5, originalHeight: 2 },
+    { ...optimizeRequest, originalWidth: 9 },
+    { ...optimizeRequest, originalHeight: 0 },
+    { ...optimizeRequest, originalWidth: undefined },
+    { ...optimizeRequest, images: ["data:image/jpeg;base64,/9j/4A=="] },
+    { ...refRequest([png, png]), resolution: "1K" },
+    { mode: "text", prompt: "旧模式", size: "1024*1024" },
   ])
     await assert.rejects(
       submitImage(body, KEY, fetcher),
@@ -146,17 +183,17 @@ test("reference count outside 2–10, client prompt and model overrides are reje
   assert.equal(calls, 0);
 });
 
-test("text prompt must be nonempty and no more than 2000 characters", async () => {
+test("optimization prompt must be nonempty and no more than 2000 characters", async () => {
   for (const prompt of ["", "   ", "a".repeat(2001), 42])
     await assert.rejects(
-      submitImage({ ...textRequest, prompt }, KEY, queued),
+      submitImage({ ...optimizeRequest, prompt }, KEY, queued),
       (error) => error.status === 400,
     );
   await assert.rejects(
-    submitImage({ ...textRequest, images: [png] }, KEY, queued),
+    submitImage({ ...optimizeRequest, images: [] }, KEY, queued),
     (error) => error.status === 400,
   );
-  await submitImage({ ...textRequest, prompt: "a".repeat(2000) }, KEY, queued);
+  await submitImage({ ...optimizeRequest, prompt: "a".repeat(2000) }, KEY, queued);
 });
 
 test("reference validation rejects URLs, SVG, malformed Base64 and forged MIME", async () => {
@@ -268,7 +305,7 @@ test("task IDs reject path traversal, arbitrary strings and malformed provider o
       (error) => error.status === 400,
     );
   await assert.rejects(
-    submitImage(textRequest, KEY, async () =>
+    submitImage(optimizeRequest, KEY, async () =>
       json({ output: { task_id: "invalid" } }),
     ),
     (error) => error.status === 502,
@@ -279,7 +316,7 @@ test("authentication, throttling and business failures are safely translated", a
   for (const status of [401, 403, 402, 429]) {
     await assert.rejects(
       submitImage(
-        textRequest,
+        optimizeRequest,
         KEY,
         async () => new Response(`${KEY}: original prompt`, { status }),
       ),
@@ -289,7 +326,7 @@ test("authentication, throttling and business failures are safely translated", a
     );
   }
   await assert.rejects(
-    submitImage(textRequest, KEY, async () =>
+    submitImage(optimizeRequest, KEY, async () =>
       json({ code: "InvalidApiKey", message: KEY }),
     ),
     (error) => error.status === 401 && !error.message.includes(KEY),
@@ -305,7 +342,7 @@ test("authentication, throttling and business failures are safely translated", a
 test("redirects never trigger a follow-up request or expose Location", async () => {
   let calls = 0;
   await assert.rejects(
-    submitImage(textRequest, KEY, async (_url, init) => {
+    submitImage(optimizeRequest, KEY, async (_url, init) => {
       calls++;
       assert.equal(init.redirect, "manual");
       return new Response(null, {
@@ -326,7 +363,7 @@ test("submission and poll timeouts are distinct, safe, and never auto-retried", 
     throw new DOMException("private upstream body", "TimeoutError");
   };
   await assert.rejects(
-    submitImage(textRequest, KEY, timeout),
+    submitImage(optimizeRequest, KEY, timeout),
     (error) =>
       error.status === 504 &&
       error.code === "IMAGE_TIMEOUT" &&
@@ -350,7 +387,7 @@ test("untrusted response streams are bounded and cancelled", async () => {
     },
   });
   await assert.rejects(
-    submitImage(textRequest, KEY, async () => new Response(payload)),
+    submitImage(optimizeRequest, KEY, async () => new Response(payload)),
     (error) => error.code === "IMAGE_RESPONSE_TOO_LARGE",
   );
   assert.equal(canceled, true);
@@ -364,10 +401,11 @@ test("image route accepts an image payload above 16 KB and keeps response privat
   const reference = `data:image/jpeg;base64,${bytes.toString("base64")}`;
   const body = {
     ...refRequest([png, reference]),
-    credentials: { dashscopeKey: KEY },
+    credentials: { qwenKey: KEY, dashscopeKey: "test-asr-only" },
   };
   let calls = 0;
-  globalThis.fetch = async () => {
+  globalThis.fetch = async (_url, init) => {
+    assert.equal(init.headers.Authorization, `Bearer ${KEY}`);
     calls++;
     return queued();
   };
@@ -384,7 +422,15 @@ test("image route accepts an image payload above 16 KB and keeps response privat
     assert.equal(result.status, 200);
     assert.match(result.headers.get("cache-control"), /no-store/);
     assert.equal((await result.json()).taskId, TASK);
-    assert.equal(calls, 1);
+    const statusRoute = load("app/api/create/image/status/route.ts");
+    const status = await statusRoute.POST(new Request("https://studio.test/api/create/image/status", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ credentials: body.credentials, taskId: TASK }),
+    }));
+    assert.equal(status.status, 200);
+    assert.equal((await status.json()).status, "pending");
+    assert.equal(calls, 2);
   } finally {
     globalThis.fetch = originalFetch;
   }

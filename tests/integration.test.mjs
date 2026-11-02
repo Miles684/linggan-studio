@@ -34,10 +34,12 @@ test("configuration exposes only booleans and forbids response caching", async (
   const body = await response.json();
   assert.deepEqual(Object.keys(body).sort(), [
     "dashscopeConfigured",
+    "qwenConfigured",
     "tikhubConfigured",
   ]);
   assert.equal(typeof body.tikhubConfigured, "boolean");
   assert.equal(typeof body.dashscopeConfigured, "boolean");
+  assert.equal(typeof body.qwenConfigured, "boolean");
 });
 
 test("route rejects invalid platform and empty or too-long keyword", async () => {
@@ -88,6 +90,7 @@ test("routes enforce JSON, bounded bodies and object payloads", async () => {
 
 test("all mutation routes reject cross-origin requests before credentials", async () => {
   for (const path of [
+    "/api/support",
     "/api/collect",
     "/api/transcribe",
     "/api/transcribe/status",

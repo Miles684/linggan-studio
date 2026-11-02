@@ -4,20 +4,24 @@
 
 ## 本站接口
 
-所有 POST 使用 JSON；响应设置 `Cache-Control: private, no-store`。请求可附 `credentials: { tikhubKey?, dashscopeKey? }`，仅本次使用；空值回落到服务器环境变量 `TIKHUB_API_KEY` / `DASHSCOPE_API_KEY`。密钥不会写入业务数据或返回客户端。百炼使用北京地域密钥。
+所有 POST 使用 JSON；响应设置 `Cache-Control: private, no-store`。请求可按需附上 `credentials: { tikhubKey?, dashscopeKey?, qwenKey? }`，仅本次使用。采集、语音识别分别使用 TikHub 和百炼密钥，未传时分别读取服务器的 `TIKHUB_API_KEY`、`DASHSCOPE_API_KEY`。千问图片、文案及转写纠错依次尝试请求中的 `qwenKey`、服务器的 `QWEN_API_KEY`、请求中的 `dashscopeKey`、服务器的 `DASHSCOPE_API_KEY`。密钥不会写入业务数据或返回客户端。百炼使用北京地域密钥。
 
 | 路径 | 请求 | 返回 |
 | --- | --- | --- |
-| GET `/api/config` | 无 | `tikhubConfigured`, `dashscopeConfigured`（仅布尔值） |
-| POST `/api/collect` | `platform`, `keyword`, `credentials?`, `autoTranscribe?` | `items`, `warnings`, `fetchedAt`, `keyword`, `platform` |
+| GET `/api/config` | 无 | `tikhubConfigured`, `dashscopeConfigured`, `qwenConfigured`（仅布尔值，各自表示服务器是否配置了对应密钥） |
+| POST `/api/support` | `question`（最多 800 字符）、`previousTopicIds?`（上轮主题）、`credentials?` | `kind`（answer/refusal/clarify）、`reply`、`topicIds` |
+| POST `/api/collect` | `platform`, `keyword`, `credentials?` | `items`, `warnings`, `fetchedAt`, `keyword`, `platform` |
 | POST `/api/transcribe` | `videoUrl`, `credentials?` | `taskId` |
 | POST `/api/transcribe/status` | `taskId`, `credentials?` | `status`, `rawText?`, `correctedText?`, `warning?`, `error?` |
 | POST `/api/images/import` | `url` | 图片二进制（采集图片或百炼生成图片） |
 | POST `/api/create/image` | `mode`, `prompt?`, `images?`, `size`, `credentials?` | `taskId`, `status`, `model` |
 | POST `/api/create/image/status` | `taskId`, `credentials?` | `status`, `images?`, `error?`, `model` |
 | POST `/api/create/copy` | `mode`, `idea?`, `source?`, `requirements?`, `experience?`, `credentials?` | `title`, `content`, `tags`, `model`, `warnings?` |
+| POST `/api/create/douyin` | `source: { platform: "douyin", id, title, transcript }`, `direction`, `feedback?`, `previous?`, `credentials?` | `voiceover`、有序 `shots: [{ duration, visual, voiceover }]` |
 
-`autoTranscribe` 由前端控制：采集不等待音频处理，前端针对各视频逐个提交并限并发轮询。状态为 `PENDING` / `RUNNING` / `SUCCEEDED` / `FAILED`；成功后再调用千问。千问失败会保留识别原文并给出警告。24,000 字以上的识别结果保留全文、跳过纠错，以避免长文本被模型截断。
+抖音编辑器一次只引用抖音采集列表中的一条视频。接口需要原口播转写（最多 24,000 个字符）与创作方向；修改意见可在第一稿就填写。继续修订时传回当前稿作为 `previous`，同时保留同一来源和创作方向。服务端使用千问生成每镜的时长、景别、动作和台词，依次计算时间段，并将有台词的镜头合并成完整口播。独立的请求体上限为 256 KiB。生成或修订均由用户主动触发。
+
+用户点击所选抖音作品的「获取语音文案」后，前端为该作品调用 `POST /api/transcribe` 并轮询状态。重复点击正在处理的作品会复用进行中的任务。状态为 `PENDING` / `RUNNING` / `SUCCEEDED` / `FAILED`。成功后调用千问纠错。千问失败会保留识别原文并给出警告。24,000 字以上的识别结果保留全文、跳过纠错，以避免长文本被模型截断。
 
 ## TikHub
 
@@ -41,13 +45,13 @@
 
 ## 安全边界与验证
 
-私有 Sites 访问控制保护服务器密钥；本版不应在配置共享服务器密钥后直接开放匿名访问。POST 拒绝跨站 Origin / Fetch-Site；仅 JSON、默认最多 16 KB 请求，图片生成单独允许 8 MB、文案生成允许 80 KB；转写地址限制为 HTTPS 抖音相关域名；生成结果地址限制为百炼 OSS 域名。出站响应有大小上限、超时、禁重定向，第三方错误经过脱敏。
+私有 Sites 访问控制保护服务器密钥；本版不应在配置共享服务器密钥后直接开放匿名访问。POST 拒绝跨站 Origin / Fetch-Site；仅 JSON、默认最多 16 KB 请求，图片生成单独允许 8 MB、文案生成允许 144 KB；转写地址限制为 HTTPS 抖音相关域名；生成结果地址限制为百炼 OSS 域名。出站响应有大小上限、超时、禁重定向，第三方错误经过脱敏。
 
 ## 小红书内容创作
 
-- 图片统一使用 `qwen-image-2.1-pro`，该模型明确支持最多 10 张参考图。服务端固定 `n:1`、`prompt_extend:false`，尺寸仅允许 1024×1024、768×1024、1024×768。文生图提交文字；图生图要求 2–10 张 JPEG/PNG/WebP Base64 图片，单张压缩后最多 1.5 MB，整次 JSON 最多 8 MB。固定图生图提示词只在 `lib/server/create-image.ts`，拒绝客户端提示词或模型覆盖。[官方图像生成与编辑 API](https://help.aliyun.com/zh/model-studio/qwen-image-generation-and-editing-api-reference)
+- 图片使用 `qwen-image-2.1-pro`。图片优化接收一张产品效果图、重绘提示词、原图宽高和 1K 或 2K 分辨率。服务端核对图片比例后按原比例计算输出尺寸。图生图使用固定提示词，接收 2–10 张参考图，支持 1:1、3:4、4:3、16:9 和 9:16。两个模式均支持 JPEG、PNG 和 WebP，单张压缩后最多 1.5 MB，整次请求最多 8 MB。[官方图像生成与编辑 API](https://help.aliyun.com/zh/model-studio/qwen-image-generation-and-editing-api-reference)
 - 图片提交 `POST /api/v1/services/aigc/image-generation/generation`，使用 `X-DashScope-Async: enable`；状态通过 `GET /api/v1/tasks/{taskId}` 查询。客户端保存任务编号，暂停或刷新后继续查询相同任务，不自动重新提交生成。成功从 `output.choices[].message.content[].image` 取得结果；生成 URL 通常有效 24 小时，存入资料库时会下载实际文件。[2.1 Pro 模型信息](https://help.aliyun.com/zh/model-studio/qwen-image-2-1-pro)
-- 文案使用 `qwen-plus` 的非思考 JSON 模式，服务端固定语气、真实性规则和输出结构。输入的原稿和用户要求作为 JSON 数据发送，不能改写系统消息。`idea` 模式根据想法创作，`rewrite` 模式根据原稿重新组织，原作者的经历不当作创作者本人经历；未提供真实体验时返回单独提醒，并检查明显的已发生亲历声明。命中检查时拒绝该次结果，不自动重新调用收费服务；此检查不能代替人工事实核对。输出包含可编辑标题、正文和话题。[结构化输出](https://help.aliyun.com/en/model-studio/qwen-structured-output)
+- 文案使用 `qwen-plus` 的非思考 JSON 模式，服务端固定语气、真实性规则和输出结构。输入的原稿和用户要求作为 JSON 数据发送，不能改写系统消息。`idea` 模式根据想法创作，`rewrite` 模式根据原稿重新组织，原作者的经历不当作创作者本人经历；未提供真实体验时返回单独提醒，并检查明显的已发生亲历声明。命中检查时拒绝该次结果，不自动重新调用收费服务；此检查不能代替人工事实核对。输出标题最多 20 个可见字符，含 1 个表情；正文每 30–40 个字符配 1 个表情，另附 5 个不同的相关热门标签。修订时附上原来的创作资料、当前草稿及修改意见，仍经过相同的事实与格式检查。[结构化输出](https://help.aliyun.com/en/model-studio/qwen-structured-output)
 
 运行 `node --test tests/api.test.mjs tests/workerd-services.test.mjs`。测试覆盖 V2 数据结构、未知统计、Top10去重排序、分页、详情失败、HTTP 200 内业务失败、鉴权错误、异步 ASR 全流程、纠错失败保留原文、URL限制和跨站请求校验；测试使用注入的假响应，不访问真实供应商。
 

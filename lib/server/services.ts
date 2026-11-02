@@ -22,7 +22,7 @@ const TIKHUB = "https://api.tikhub.io";
 const BAILIAN = "https://dashscope.aliyuncs.com";
 
 /** Do not expose upstream bodies: they may contain request parameters or credentials. */
-function upstreamFailure(
+export function upstreamFailure(
   provider: string,
   status: number,
   code?: unknown,
@@ -60,12 +60,13 @@ function upstreamFailure(
   );
 }
 
-async function requestJson(
+export async function requestJson(
   url: string,
   init: RequestInit,
   provider: string,
   fetcher: Fetcher,
   timeout = 40000,
+  maxBytes = 8_000_000,
 ): Promise<Json> {
   try {
     const response = await fetcher(url, {
@@ -84,7 +85,7 @@ async function requestJson(
     }
     if (!response.ok) throw upstreamFailure(provider, response.status);
     const size = Number(response.headers.get("content-length") || 0);
-    if (size > 8_000_000)
+    if (size > maxBytes)
       throw new ServiceError(`${provider} 返回内容过大，请缩小查询范围。`);
     const reader = response.body?.getReader();
     let raw = "";
@@ -95,7 +96,7 @@ async function requestJson(
         const { done, value } = await reader.read();
         if (done) break;
         total += value.byteLength;
-        if (total > 8_000_000) {
+        if (total > maxBytes) {
           await reader.cancel();
           throw new ServiceError(`${provider} 返回内容过大。`);
         }
@@ -424,6 +425,7 @@ export async function pollTranscription(
   taskId: unknown,
   key: string,
   fetcher: Fetcher = fetch,
+  correctionKey: () => string = () => key,
 ) {
   if (typeof taskId !== "string" || !/^[\w-]{8,128}$/.test(taskId))
     throw new ServiceError("转写任务编号无效。", 400, "INVALID_INPUT");
@@ -497,7 +499,7 @@ export async function pollTranscription(
       `${BAILIAN}/compatible-mode/v1/chat/completions`,
       {
         method: "POST",
-        headers: auth(key),
+        headers: auth(correctionKey()),
         body: JSON.stringify({
           model: "qwen-plus",
           enable_thinking: false,

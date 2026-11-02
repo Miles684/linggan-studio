@@ -1,4 +1,11 @@
 const MAX_BODY_BYTES = 16000;
+export const MAX_COPY_REQUEST_BYTES = 144_000;
+export const MAX_DOUYIN_REQUEST_BYTES = 256 * 1024;
+const creationBodyLimits: Record<string, number> = {
+  "/api/create/image": 8 * 1024 * 1024,
+  "/api/create/copy": MAX_COPY_REQUEST_BYTES,
+  "/api/create/douyin": MAX_DOUYIN_REQUEST_BYTES,
+};
 const BODY_TIMEOUT_MS = 5000;
 
 class BodyError extends Error {
@@ -25,12 +32,7 @@ export async function bufferApiRequest(
   )
     return request;
   const path = new URL(request.url).pathname;
-  const maxBytes =
-    path === "/api/create/image"
-      ? 8 * 1024 * 1024
-      : path === "/api/create/copy"
-        ? 80000
-        : MAX_BODY_BYTES;
+  const maxBytes = creationBodyLimits[path] ?? MAX_BODY_BYTES;
   const timeoutMs = path === "/api/create/image" ? 30000 : BODY_TIMEOUT_MS;
   const reader = request.body.getReader();
   let finished = false;

@@ -23,4 +23,4 @@ export type ContentItem = {
   transcript?: Transcript;
   demo?: boolean;
 };
-export type Credentials = { tikhubKey?: string; dashscopeKey?: string };
+export type Credentials = { tikhubKey?: string; dashscopeKey?: string; qwenKey?: string };

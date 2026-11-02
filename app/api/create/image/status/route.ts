@@ -14,7 +14,7 @@ export async function POST(request: Request) {
         "INVALID_INPUT",
       );
     return json(
-      await pollImage(body.taskId, resolveKey(body.credentials, "dashscope")),
+      await pollImage(body.taskId, resolveKey(body.credentials, "qwen")),
     );
   } catch (error) {
     return failure(error);
