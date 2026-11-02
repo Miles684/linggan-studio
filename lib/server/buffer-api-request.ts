@@ -24,6 +24,14 @@ export async function bufferApiRequest(
     !request.body
   )
     return request;
+  const path = new URL(request.url).pathname;
+  const maxBytes =
+    path === "/api/create/image"
+      ? 8 * 1024 * 1024
+      : path === "/api/create/copy"
+        ? 80000
+        : MAX_BODY_BYTES;
+  const timeoutMs = path === "/api/create/image" ? 30000 : BODY_TIMEOUT_MS;
   const reader = request.body.getReader();
   let finished = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -39,8 +47,7 @@ export async function bufferApiRequest(
             break;
           }
           length += value.byteLength;
-          if (length > MAX_BODY_BYTES)
-            throw new BodyError("请求内容过大。", 413);
+          if (length > maxBytes) throw new BodyError("请求内容过大。", 413);
           chunks.push(value);
         }
         const result = new Uint8Array(length);
@@ -54,7 +61,7 @@ export async function bufferApiRequest(
       new Promise<never>((_, reject) => {
         timer = setTimeout(
           () => reject(new BodyError("请求内容接收超时，请重试。", 408)),
-          BODY_TIMEOUT_MS,
+          timeoutMs,
         );
       }),
     ]);

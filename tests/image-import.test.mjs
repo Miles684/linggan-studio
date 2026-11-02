@@ -94,6 +94,23 @@ test("valid image bytes are returned with detected type and no forwarded credent
   assert.deepEqual(new Uint8Array(image.data), png);
 });
 
+test("generated image import permits official Bailian OSS host patterns only", () => {
+  for (const host of [
+    "dashscope-result-bj.oss-cn-beijing.aliyuncs.com",
+    "dashscope-a717.oss-accelerate.aliyuncs.com",
+  ])
+    assert.equal(
+      validateImageUrl(`https://${host}/image.png?Expires=fixture`),
+      `https://${host}/image.png?Expires=fixture`,
+    );
+  for (const host of [
+    "dashscope-result-bj.oss-cn-beijing.aliyuncs.com.evil.invalid",
+    "dashscope-result-bj.example.com",
+    "arbitrary.oss-cn-beijing.aliyuncs.com",
+  ])
+    assert.throws(() => validateImageUrl(`https://${host}/image.png`));
+});
+
 test("redirects are rejected before visiting the destination and response is cancelled", async () => {
   let cancelled = false,
     calls = 0;

@@ -12,6 +12,10 @@
 | POST `/api/collect` | `platform`, `keyword`, `credentials?`, `autoTranscribe?` | `items`, `warnings`, `fetchedAt`, `keyword`, `platform` |
 | POST `/api/transcribe` | `videoUrl`, `credentials?` | `taskId` |
 | POST `/api/transcribe/status` | `taskId`, `credentials?` | `status`, `rawText?`, `correctedText?`, `warning?`, `error?` |
+| POST `/api/images/import` | `url` | 图片二进制（采集图片或百炼生成图片） |
+| POST `/api/create/image` | `mode`, `prompt?`, `images?`, `size`, `credentials?` | `taskId`, `status`, `model` |
+| POST `/api/create/image/status` | `taskId`, `credentials?` | `status`, `images?`, `error?`, `model` |
+| POST `/api/create/copy` | `mode`, `idea?`, `source?`, `requirements?`, `experience?`, `credentials?` | `title`, `content`, `tags`, `model`, `warnings?` |
 
 `autoTranscribe` 由前端控制：采集不等待音频处理，前端针对各视频逐个提交并限并发轮询。状态为 `PENDING` / `RUNNING` / `SUCCEEDED` / `FAILED`；成功后再调用千问。千问失败会保留识别原文并给出警告。24,000 字以上的识别结果保留全文、跳过纠错，以避免长文本被模型截断。
 
@@ -37,7 +41,13 @@
 
 ## 安全边界与验证
 
-私有 Sites 访问控制保护服务器密钥；本版不应在配置共享服务器密钥后直接开放匿名访问。POST 拒绝跨站 Origin / Fetch-Site；仅 JSON、最多 16 KB 请求；转写地址限制为 HTTPS 抖音相关域名；结果地址限制为百炼 OSS 域名。出站响应最大 8 MB、有超时、禁重定向，第三方错误经过脱敏。
+私有 Sites 访问控制保护服务器密钥；本版不应在配置共享服务器密钥后直接开放匿名访问。POST 拒绝跨站 Origin / Fetch-Site；仅 JSON、默认最多 16 KB 请求，图片生成单独允许 8 MB、文案生成允许 80 KB；转写地址限制为 HTTPS 抖音相关域名；生成结果地址限制为百炼 OSS 域名。出站响应有大小上限、超时、禁重定向，第三方错误经过脱敏。
+
+## 小红书内容创作
+
+- 图片统一使用 `qwen-image-2.1-pro`，该模型明确支持最多 10 张参考图。服务端固定 `n:1`、`prompt_extend:false`，尺寸仅允许 1024×1024、768×1024、1024×768。文生图提交文字；图生图要求 2–10 张 JPEG/PNG/WebP Base64 图片，单张压缩后最多 1.5 MB，整次 JSON 最多 8 MB。固定图生图提示词只在 `lib/server/create-image.ts`，拒绝客户端提示词或模型覆盖。[官方图像生成与编辑 API](https://help.aliyun.com/zh/model-studio/qwen-image-generation-and-editing-api-reference)
+- 图片提交 `POST /api/v1/services/aigc/image-generation/generation`，使用 `X-DashScope-Async: enable`；状态通过 `GET /api/v1/tasks/{taskId}` 查询。客户端保存任务编号，暂停或刷新后继续查询相同任务，不自动重新提交生成。成功从 `output.choices[].message.content[].image` 取得结果；生成 URL 通常有效 24 小时，存入资料库时会下载实际文件。[2.1 Pro 模型信息](https://help.aliyun.com/zh/model-studio/qwen-image-2-1-pro)
+- 文案使用 `qwen-plus` 的非思考 JSON 模式，服务端固定语气、真实性规则和输出结构。输入的原稿和用户要求作为 JSON 数据发送，不能改写系统消息。`idea` 模式根据想法创作，`rewrite` 模式根据原稿重新组织，原作者的经历不当作创作者本人经历；未提供真实体验时返回单独提醒，并检查明显的已发生亲历声明。命中检查时拒绝该次结果，不自动重新调用收费服务；此检查不能代替人工事实核对。输出包含可编辑标题、正文和话题。[结构化输出](https://help.aliyun.com/en/model-studio/qwen-structured-output)
 
 运行 `node --test tests/api.test.mjs tests/workerd-services.test.mjs`。测试覆盖 V2 数据结构、未知统计、Top10去重排序、分页、详情失败、HTTP 200 内业务失败、鉴权错误、异步 ASR 全流程、纠错失败保留原文、URL限制和跨站请求校验；测试使用注入的假响应，不访问真实供应商。
 

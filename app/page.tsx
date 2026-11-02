@@ -38,6 +38,7 @@ import type {
 } from "../lib/types";
 import { getDemo } from "../lib/demo";
 import { ProductLibrary, NoteLibrary } from "../components/asset-libraries";
+import { CreationStudio } from "../components/creation-studio";
 import {
   listImages,
   putImage,
@@ -115,6 +116,13 @@ const pause = (ms: number, signal: AbortSignal) =>
     if (signal.aborted) onAbort();
   });
 export default function Home() {
+  const [creationStep, setCreationStep] = useState<"collect" | "create">(
+    "collect",
+  );
+  const [creationSource, setCreationSource] = useState<ContentItem | null>(
+    null,
+  );
+  const [creationLaunchId, setCreationLaunchId] = useState(0);
   const [page, setPage] = useState("创作中心"),
     [platform, setPlatform] = useState<Platform>("xiaohongshu"),
     [keyword, setKeyword] = useState("咖啡店运营"),
@@ -306,6 +314,81 @@ export default function Home() {
     setPage(next);
     setMobileMenu(false);
     window.scrollTo({ top: 0, behavior: "instant" });
+  }
+  function openCreation(source?: ContentItem) {
+    if (source) {
+      setCreationSource(source);
+      setCreationLaunchId((value) => value + 1);
+    }
+    setSelectedId(null);
+    setLightbox(null);
+    setCreationStep("create");
+    navigate("创作中心");
+  }
+  const creationSources = Array.from(
+    new Map(
+      [
+        ...noteMaterials.map((note): ContentItem => ({
+          id: note.sourceId,
+          platform: note.platform,
+          title: note.title,
+          content: note.content,
+          author: note.author,
+          cover: "",
+          images: [],
+          url: note.sourceUrl,
+          likes: null,
+          favorites: null,
+          comments: null,
+          plays: null,
+          demo: note.demo,
+        })),
+        ...Object.values(saved),
+        ...items,
+      ]
+        .filter(
+          (item) => item.platform === "xiaohongshu" && item.content.trim(),
+        )
+        .map((item) => [item.id, item]),
+    ).values(),
+  );
+  async function saveCreatedImage(blob: Blob, title: string) {
+    if (!libraryReady) throw new Error("本地资料库尚未就绪，请稍后再试。");
+    const id = `ai-image-${crypto.randomUUID()}`;
+    const record: LibraryImage = {
+      id,
+      sourceId: id,
+      platform: "xiaohongshu",
+      title: title || "AI 产品图",
+      author: "千问 AI 创作",
+      sourceUrl: "",
+      originalUrl: "",
+      imageIndex: 0,
+      blob,
+      createdAt: new Date().toISOString(),
+      demo: false,
+    };
+    await putImage(record);
+    setProductImages((old) => [record, ...old]);
+    setToast("生成图片已存入产品资料库");
+  }
+  async function saveCreatedNote(note: { title: string; content: string }) {
+    if (!libraryReady) throw new Error("本地资料库尚未就绪，请稍后再试。");
+    const id = `ai-note-${crypto.randomUUID()}`;
+    const record: LibraryNote = {
+      id,
+      sourceId: id,
+      platform: "xiaohongshu",
+      title: note.title,
+      author: "千问 AI 创作",
+      sourceUrl: "",
+      content: note.content,
+      createdAt: new Date().toISOString(),
+      demo: false,
+    };
+    await putNote(record);
+    setNoteMaterials((old) => [record, ...old]);
+    setToast("创作文案已存入素材库");
   }
   async function saveNoteContent(item: ContentItem) {
     const id = noteId(item);
@@ -654,6 +737,14 @@ export default function Home() {
       setToast("当前浏览器无法复制，请选中文字手动复制");
     }
   }
+  async function copyCreationText(text: string) {
+    try {
+      await navigator.clipboard.writeText(text);
+      setToast("已复制到剪贴板");
+    } catch {
+      throw new Error("当前浏览器无法复制，请选中文字手动复制。");
+    }
+  }
   const transcriptView = (item: ContentItem, compact = false) => {
     const state = item.transcript;
     return (
@@ -816,6 +907,15 @@ export default function Home() {
               查看详情
               <ChevronRight size={13} />
             </button>
+            {item.platform === "xiaohongshu" && (
+              <button
+                onClick={() => openCreation(item)}
+                disabled={!item.content.trim()}
+              >
+                <WandSparkles size={13} />
+                以此改写
+              </button>
+            )}
             <button
               onClick={() => saveNoteContent(item)}
               disabled={
@@ -949,7 +1049,7 @@ export default function Home() {
               aria-label="使用说明"
               onClick={() =>
                 setToast(
-                  "选择平台和关键词开始采集；在设置中配置密钥即可使用实时模式。",
+                  "先采集热点，再点击第二步“内容创作”生成图片与文案；采集笔记可点击“以此改写”。",
                 )
               }
             >
@@ -972,7 +1072,11 @@ export default function Home() {
                   <h1>
                     让灵感，成为下一个好作品<span>✦</span>
                   </h1>
-                  <p>发现值得创作的内容，从捕捉每一个热点开始。</p>
+                  <p>
+                    {creationStep === "collect"
+                      ? "发现值得创作的内容，从捕捉每一个热点开始。"
+                      : "用一张好图、一段真诚的分享，让产品故事自然发生。"}
+                  </p>
                 </div>
                 <button
                   className="subtle-button"
@@ -984,22 +1088,37 @@ export default function Home() {
                 </button>
               </section>
               <div className="workflow">
-                <div className="workflow-current">
+                <button
+                  type="button"
+                  className={`workflow-button ${creationStep === "collect" ? "workflow-current" : "workflow-next"}`}
+                  onClick={() => setCreationStep("collect")}
+                  aria-current={creationStep === "collect" ? "step" : undefined}
+                >
                   <span className="step-number">01</span>
                   <div>
                     <strong>采集热点</strong>
                     <small>发现内容灵感</small>
                   </div>
-                  <span className="current-dot">进行中</span>
-                </div>
+                  {creationStep === "collect" && (
+                    <span className="current-dot">进行中</span>
+                  )}
+                </button>
                 <div className="workflow-line" />
-                <div className="workflow-next">
+                <button
+                  type="button"
+                  className={`workflow-button ${creationStep === "create" ? "workflow-current" : "workflow-next"}`}
+                  onClick={() => openCreation()}
+                  aria-current={creationStep === "create" ? "step" : undefined}
+                >
                   <span className="step-number">02</span>
                   <div>
                     <strong>内容创作</strong>
-                    <small>下一步 · 即将开放</small>
+                    <small>图片生成 · 文案生成</small>
                   </div>
-                </div>
+                  {creationStep === "create" && (
+                    <span className="current-dot">进行中</span>
+                  )}
+                </button>
                 <div className="workflow-line" />
                 <div className="workflow-next">
                   <span className="step-number">03</span>
@@ -1009,268 +1128,287 @@ export default function Home() {
                   </div>
                 </div>
               </div>
-              <section className="search-panel">
-                <div className="search-panel-top">
-                  <div className="section-label">
-                    <span className="small-icon">
-                      <Flame size={18} />
-                    </span>
-                    <h2>寻找你的下一个创作灵感</h2>
+              <div hidden={creationStep !== "create"}>
+                <CreationStudio
+                  sources={creationSources}
+                  productImages={productImages}
+                  credentials={credentials}
+                  configured={dashscopeReady}
+                  initialSource={creationSource}
+                  launchId={creationLaunchId}
+                  onCopy={copyCreationText}
+                  onSaveImage={saveCreatedImage}
+                  onSaveNote={saveCreatedNote}
+                  onSettings={() => navigate("设置")}
+                />
+              </div>
+              <div hidden={creationStep !== "collect"}>
+                <section className="search-panel">
+                  <div className="search-panel-top">
+                    <div className="section-label">
+                      <span className="small-icon">
+                        <Flame size={18} />
+                      </span>
+                      <h2>寻找你的下一个创作灵感</h2>
+                    </div>
+                    <div className="mode-switch" aria-label="数据模式">
+                      <button
+                        className={mode === "demo" ? "selected" : ""}
+                        onClick={() => changeMode("demo")}
+                      >
+                        演示预览
+                      </button>
+                      <button
+                        className={mode === "live" ? "selected" : ""}
+                        onClick={() => changeMode("live")}
+                      >
+                        <i className={tikhubReady ? "green-dot" : "gray-dot"} />
+                        实时采集
+                      </button>
+                    </div>
                   </div>
-                  <div className="mode-switch" aria-label="数据模式">
-                    <button
-                      className={mode === "demo" ? "selected" : ""}
-                      onClick={() => changeMode("demo")}
+                  <div className="platform-row">
+                    <span className="field-label">内容平台</span>
+                    <div
+                      className="platform-tabs"
+                      role="tablist"
+                      aria-label="选择采集平台"
                     >
-                      演示预览
-                    </button>
-                    <button
-                      className={mode === "live" ? "selected" : ""}
-                      onClick={() => changeMode("live")}
-                    >
-                      <i className={tikhubReady ? "green-dot" : "gray-dot"} />
-                      实时采集
-                    </button>
+                      <button
+                        role="tab"
+                        aria-selected={platform === "xiaohongshu"}
+                        onClick={() => changePlatform("xiaohongshu")}
+                        className={platform === "xiaohongshu" ? "selected" : ""}
+                      >
+                        <span className="xhs-logo">小红书</span>
+                        <strong>小红书</strong>
+                        <small>发现好笔记</small>
+                        {platform === "xiaohongshu" && (
+                          <CheckCircle2 size={15} />
+                        )}
+                      </button>
+                      <button
+                        role="tab"
+                        aria-selected={platform === "douyin"}
+                        onClick={() => changePlatform("douyin")}
+                        className={platform === "douyin" ? "selected" : ""}
+                      >
+                        <span className="douyin-logo">♪</span>
+                        <strong>抖音</strong>
+                        <small>捕捉好内容</small>
+                        {platform === "douyin" && <CheckCircle2 size={15} />}
+                      </button>
+                    </div>
                   </div>
-                </div>
-                <div className="platform-row">
-                  <span className="field-label">内容平台</span>
-                  <div
-                    className="platform-tabs"
-                    role="tablist"
-                    aria-label="选择采集平台"
+                  <form
+                    className="search-form"
+                    onSubmit={(e) => {
+                      e.preventDefault();
+                      void collect();
+                    }}
                   >
-                    <button
-                      role="tab"
-                      aria-selected={platform === "xiaohongshu"}
-                      onClick={() => changePlatform("xiaohongshu")}
-                      className={platform === "xiaohongshu" ? "selected" : ""}
-                    >
-                      <span className="xhs-logo">小红书</span>
-                      <strong>小红书</strong>
-                      <small>发现好笔记</small>
-                      {platform === "xiaohongshu" && <CheckCircle2 size={15} />}
-                    </button>
-                    <button
-                      role="tab"
-                      aria-selected={platform === "douyin"}
-                      onClick={() => changePlatform("douyin")}
-                      className={platform === "douyin" ? "selected" : ""}
-                    >
-                      <span className="douyin-logo">♪</span>
-                      <strong>抖音</strong>
-                      <small>捕捉好内容</small>
-                      {platform === "douyin" && <CheckCircle2 size={15} />}
-                    </button>
-                  </div>
-                </div>
-                <form
-                  className="search-form"
-                  onSubmit={(e) => {
-                    e.preventDefault();
-                    void collect();
-                  }}
-                >
-                  <label className="keyword-input">
-                    <Search size={19} />
-                    <input
-                      value={keyword}
-                      onChange={(e) => setKeyword(e.target.value)}
-                      maxLength={80}
-                      placeholder="输入你感兴趣的关键词，例如：咖啡店运营"
-                      aria-label="采集关键词"
-                    />
-                    <span className="top10-label">TOP 10</span>
-                  </label>
-                  <button
-                    className="collect-button"
-                    type="submit"
-                    disabled={loading}
-                  >
-                    {loading ? (
-                      <LoaderCircle size={17} className="spin" />
-                    ) : (
-                      <Sparkles size={17} />
-                    )}{" "}
-                    {loading ? "正在采集…" : "开始采集"}
-                    {!loading && <ArrowRight size={16} />}
-                  </button>
-                </form>
-                <div className="search-bottom">
-                  <div className="suggestions">
-                    <span>试试这些</span>
-                    {(recent.length
-                      ? recent
-                      : ["咖啡店运营", "生活方式", "秋日穿搭"]
-                    )
-                      .slice(0, 3)
-                      .map((value) => (
-                        <button key={value} onClick={() => setKeyword(value)}>
-                          {value}
-                          <Plus size={10} />
-                        </button>
-                      ))}
-                  </div>
-                  {platform === "douyin" ? (
-                    <label className="auto-transcribe">
+                    <label className="keyword-input">
+                      <Search size={19} />
                       <input
-                        type="checkbox"
-                        checked={autoTranscribe}
-                        onChange={(e) => setAutoTranscribe(e.target.checked)}
+                        value={keyword}
+                        onChange={(e) => setKeyword(e.target.value)}
+                        maxLength={80}
+                        placeholder="输入你感兴趣的关键词，例如：咖啡店运营"
+                        aria-label="采集关键词"
                       />
-                      <span>自动转写语音并纠错</span>
-                      <AudioLines size={13} />
+                      <span className="top10-label">TOP 10</span>
                     </label>
-                  ) : (
-                    <span className="search-note">
-                      <SlidersHorizontal size={13} />
-                      按点赞热度采集
-                    </span>
-                  )}
-                </div>
-              </section>
-              {mode === "demo" ? (
-                <div className="demo-banner">
-                  <span>
-                    <span className="demo-tag">演示</span>
-                    {tikhubReady
-                      ? "当前展示示例内容，非平台实时数据。采集服务已配置，可切换至实时采集。"
-                      : "当前展示示例内容，非平台实时数据。配置 API 后，即可开启真实热点采集。"}
-                  </span>
-                  <button
-                    onClick={() =>
-                      tikhubReady ? changeMode("live") : navigate("设置")
-                    }
-                  >
-                    {tikhubReady ? "切换实时采集" : "配置服务"}
-                    <ArrowRight size={13} />
-                  </button>
-                </div>
-              ) : (
-                <div className="live-banner">
-                  <span>
-                    <ShieldCheck size={14} />
-                    通过 TikHub 获取关键词搜索结果，按点赞排序展示最多 10 条。
-                  </span>
-                  <span>语音识别：百炼 · 文本纠错：千问</span>
-                </div>
-              )}
-              {(error || warnings.length > 0) && (
-                <div
-                  role="alert"
-                  className={`notice ${error ? "error-notice" : ""}`}
-                >
-                  {error && <p>{error}</p>}
-                  {warnings.map((w, i) => (
-                    <p key={i}>{w}</p>
-                  ))}
-                </div>
-              )}
-              <section className="results-section">
-                <div className="results-header">
-                  <div className="results-title">
-                    <h2>灵感发现</h2>
-                    <span className="result-count">{items.length}</span>
-                    <span className="result-keyword">“{resultKeyword}”</span>
-                    {loading && (
-                      <span className="loading-label">
-                        <LoaderCircle size={13} className="spin" />
-                        采集中
+                    <button
+                      className="collect-button"
+                      type="submit"
+                      disabled={loading}
+                    >
+                      {loading ? (
+                        <LoaderCircle size={17} className="spin" />
+                      ) : (
+                        <Sparkles size={17} />
+                      )}{" "}
+                      {loading ? "正在采集…" : "开始采集"}
+                      {!loading && <ArrowRight size={16} />}
+                    </button>
+                  </form>
+                  <div className="search-bottom">
+                    <div className="suggestions">
+                      <span>试试这些</span>
+                      {(recent.length
+                        ? recent
+                        : ["咖啡店运营", "生活方式", "秋日穿搭"]
+                      )
+                        .slice(0, 3)
+                        .map((value) => (
+                          <button key={value} onClick={() => setKeyword(value)}>
+                            {value}
+                            <Plus size={10} />
+                          </button>
+                        ))}
+                    </div>
+                    {platform === "douyin" ? (
+                      <label className="auto-transcribe">
+                        <input
+                          type="checkbox"
+                          checked={autoTranscribe}
+                          onChange={(e) => setAutoTranscribe(e.target.checked)}
+                        />
+                        <span>自动转写语音并纠错</span>
+                        <AudioLines size={13} />
+                      </label>
+                    ) : (
+                      <span className="search-note">
+                        <SlidersHorizontal size={13} />
+                        按点赞热度采集
                       </span>
                     )}
                   </div>
-                  <div className="results-tools">
-                    {(loading || activeJobs > 0) && (
-                      <button className="text-button" onClick={cancel}>
-                        取消{loading ? "采集" : "转写"}
-                      </button>
-                    )}
-                    <span className="sort-label">
-                      <Flame size={13} />
-                      点赞优先
+                </section>
+                {mode === "demo" ? (
+                  <div className="demo-banner">
+                    <span>
+                      <span className="demo-tag">演示</span>
+                      {tikhubReady
+                        ? "当前展示示例内容，非平台实时数据。采集服务已配置，可切换至实时采集。"
+                        : "当前展示示例内容，非平台实时数据。配置 API 后，即可开启真实热点采集。"}
                     </span>
                     <button
-                      className="export-button"
-                      disabled={!items.length}
-                      onClick={() => exportItems(items)}
+                      onClick={() =>
+                        tikhubReady ? changeMode("live") : navigate("设置")
+                      }
                     >
-                      <ArrowDownToLine size={14} />
-                      导出结果
+                      {tikhubReady ? "切换实时采集" : "配置服务"}
+                      <ArrowRight size={13} />
                     </button>
                   </div>
-                </div>
-                <div className="results-subhead">
-                  <div className="result-tabs">
-                    <button
-                      className={filter === "all" ? "active" : ""}
-                      onClick={() => setFilter("all")}
-                    >
-                      全部内容 <span>{items.length}</span>
-                    </button>
-                    <button
-                      className={filter === "saved" ? "active" : ""}
-                      onClick={() => setFilter("saved")}
-                    >
-                      已收藏{" "}
-                      <span>{items.filter((x) => saved[x.id]).length}</span>
-                    </button>
-                  </div>
-                  <span className="result-time">
-                    {activeJobs > 0 ? (
-                      <>
-                        <AudioLines size={12} />
-                        {activeJobs} 条视频正在转写
-                      </>
-                    ) : fetchedAt ? (
-                      <>
-                        <Clock3 size={12} />
-                        {new Date(fetchedAt).toLocaleTimeString("zh-CN", {
-                          hour: "2-digit",
-                          minute: "2-digit",
-                        })}{" "}
-                        采集
-                      </>
-                    ) : mode === "demo" ? (
-                      "示例内容 · 仅供预览"
-                    ) : (
-                      "等待采集"
-                    )}
-                  </span>
-                </div>
-                <div className="result-list">
-                  {loading ? (
-                    <div className="loading-state">
-                      <LoaderCircle size={30} className="spin" />
-                      <h3>正在寻找值得关注的内容</h3>
-                      <p>获取搜索结果与作品详情，请稍候…</p>
-                    </div>
-                  ) : shown.length ? (
-                    shown.map(card)
-                  ) : (
-                    <div className="empty-state">
-                      <Search size={35} />
-                      <h3>
-                        {filter === "saved"
-                          ? "还没有收藏灵感"
-                          : "好内容，从一次搜索开始"}
-                      </h3>
-                      <p>
-                        {filter === "saved"
-                          ? "点击作品右侧的收藏图标，把喜欢的内容收进素材库。"
-                          : "选择一个平台，输入关键词，发现与你相关的热门内容。"}
-                      </p>
-                    </div>
-                  )}
-                </div>
-                {shown.length > 0 && (
-                  <div className="list-end">
-                    <span />
-                    已展示 {shown.length} 条{mode === "demo" ? "示例" : "采集"}
-                    内容 · 灵感正在发生
-                    <span />
+                ) : (
+                  <div className="live-banner">
+                    <span>
+                      <ShieldCheck size={14} />
+                      通过 TikHub 获取关键词搜索结果，按点赞排序展示最多 10 条。
+                    </span>
+                    <span>语音识别：百炼 · 文本纠错：千问</span>
                   </div>
                 )}
-              </section>
+                {(error || warnings.length > 0) && (
+                  <div
+                    role="alert"
+                    className={`notice ${error ? "error-notice" : ""}`}
+                  >
+                    {error && <p>{error}</p>}
+                    {warnings.map((w, i) => (
+                      <p key={i}>{w}</p>
+                    ))}
+                  </div>
+                )}
+                <section className="results-section">
+                  <div className="results-header">
+                    <div className="results-title">
+                      <h2>灵感发现</h2>
+                      <span className="result-count">{items.length}</span>
+                      <span className="result-keyword">“{resultKeyword}”</span>
+                      {loading && (
+                        <span className="loading-label">
+                          <LoaderCircle size={13} className="spin" />
+                          采集中
+                        </span>
+                      )}
+                    </div>
+                    <div className="results-tools">
+                      {(loading || activeJobs > 0) && (
+                        <button className="text-button" onClick={cancel}>
+                          取消{loading ? "采集" : "转写"}
+                        </button>
+                      )}
+                      <span className="sort-label">
+                        <Flame size={13} />
+                        点赞优先
+                      </span>
+                      <button
+                        className="export-button"
+                        disabled={!items.length}
+                        onClick={() => exportItems(items)}
+                      >
+                        <ArrowDownToLine size={14} />
+                        导出结果
+                      </button>
+                    </div>
+                  </div>
+                  <div className="results-subhead">
+                    <div className="result-tabs">
+                      <button
+                        className={filter === "all" ? "active" : ""}
+                        onClick={() => setFilter("all")}
+                      >
+                        全部内容 <span>{items.length}</span>
+                      </button>
+                      <button
+                        className={filter === "saved" ? "active" : ""}
+                        onClick={() => setFilter("saved")}
+                      >
+                        已收藏{" "}
+                        <span>{items.filter((x) => saved[x.id]).length}</span>
+                      </button>
+                    </div>
+                    <span className="result-time">
+                      {activeJobs > 0 ? (
+                        <>
+                          <AudioLines size={12} />
+                          {activeJobs} 条视频正在转写
+                        </>
+                      ) : fetchedAt ? (
+                        <>
+                          <Clock3 size={12} />
+                          {new Date(fetchedAt).toLocaleTimeString("zh-CN", {
+                            hour: "2-digit",
+                            minute: "2-digit",
+                          })}{" "}
+                          采集
+                        </>
+                      ) : mode === "demo" ? (
+                        "示例内容 · 仅供预览"
+                      ) : (
+                        "等待采集"
+                      )}
+                    </span>
+                  </div>
+                  <div className="result-list">
+                    {loading ? (
+                      <div className="loading-state">
+                        <LoaderCircle size={30} className="spin" />
+                        <h3>正在寻找值得关注的内容</h3>
+                        <p>获取搜索结果与作品详情，请稍候…</p>
+                      </div>
+                    ) : shown.length ? (
+                      shown.map(card)
+                    ) : (
+                      <div className="empty-state">
+                        <Search size={35} />
+                        <h3>
+                          {filter === "saved"
+                            ? "还没有收藏灵感"
+                            : "好内容，从一次搜索开始"}
+                        </h3>
+                        <p>
+                          {filter === "saved"
+                            ? "点击作品右侧的收藏图标，把喜欢的内容收进素材库。"
+                            : "选择一个平台，输入关键词，发现与你相关的热门内容。"}
+                        </p>
+                      </div>
+                    )}
+                  </div>
+                  {shown.length > 0 && (
+                    <div className="list-end">
+                      <span />
+                      已展示 {shown.length} 条
+                      {mode === "demo" ? "示例" : "采集"}
+                      内容 · 灵感正在发生
+                      <span />
+                    </div>
+                  )}
+                </section>
+              </div>
             </>
           ) : page === "设置" ? (
             <>
@@ -1627,7 +1765,7 @@ export default function Home() {
                     ? "这里将用于整理品牌介绍、产品卖点与创作参考资料。"
                     : "这里将用于管理创作记录、内容状态与成品归档。"}
                   <br />
-                  本期已开放热点采集与素材收藏，先去捕捉灵感吧。
+                  已开放热点采集、图片生成、文案创作与资料保存。
                 </p>
                 <button
                   className="collect-button"
@@ -1726,6 +1864,16 @@ export default function Home() {
                     : "作品文案"}
                 </h3>
                 <div className="detail-note-actions">
+                  {selected.platform === "xiaohongshu" && (
+                    <button
+                      className="text-button"
+                      disabled={!selected.content.trim()}
+                      onClick={() => openCreation(selected)}
+                    >
+                      <WandSparkles size={13} />
+                      以此改写
+                    </button>
+                  )}
                   <button
                     className="text-button"
                     disabled={

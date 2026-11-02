@@ -22,6 +22,13 @@ const IMAGE_TYPES = [
 type ImageType = (typeof IMAGE_TYPES)[number];
 export type ImportedImage = { data: ArrayBuffer; contentType: ImageType };
 
+/** Official Bailian generated-image OSS hosts; never allow arbitrary OSS URLs. */
+export function isGeneratedImageHost(host: string): boolean {
+  return /^dashscope-[a-z0-9-]+\.oss-(?:accelerate|cn-[a-z0-9-]+)\.aliyuncs\.com$/.test(
+    host,
+  );
+}
+
 export function validateImageUrl(raw: unknown): string {
   if (typeof raw !== "string" || raw.length > 8192)
     throw new ServiceError(
@@ -44,13 +51,16 @@ export function validateImageUrl(raw: unknown): string {
     url.username ||
     url.password ||
     url.port ||
-    !IMAGE_DOMAINS.some(
-      (domain) =>
-        url.hostname === domain || url.hostname.endsWith(`.${domain}`),
+    !(
+      isGeneratedImageHost(url.hostname) ||
+      IMAGE_DOMAINS.some(
+        (domain) =>
+          url.hostname === domain || url.hostname.endsWith(`.${domain}`),
+      )
     )
   )
     throw new ServiceError(
-      "仅支持保存采集结果中的小红书、抖音平台图片。",
+      "仅支持保存采集结果或千问生成的图片。",
       400,
       "INVALID_IMAGE_URL",
     );

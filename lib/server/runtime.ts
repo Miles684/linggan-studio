@@ -50,6 +50,7 @@ export function resolveKey(
 
 export async function readBody(
   request: Request,
+  maxBytes = 16000,
 ): Promise<Record<string, unknown>> {
   const origin = request.headers.get("origin");
   if (request.headers.get("sec-fetch-site") === "cross-site")
@@ -71,7 +72,7 @@ export async function readBody(
       .startsWith("application/json")
   )
     throw new ServiceError("请求必须使用 JSON 格式。", 415, "INVALID_INPUT");
-  if (Number(request.headers.get("content-length") || 0) > 16000)
+  if (Number(request.headers.get("content-length") || 0) > maxBytes)
     throw new ServiceError("请求内容过大。", 413, "INVALID_INPUT");
   const reader = request.body?.getReader();
   let raw = "";
@@ -82,7 +83,7 @@ export async function readBody(
       const { value, done } = await reader.read();
       if (done) break;
       bytes += value.byteLength;
-      if (bytes > 16000) {
+      if (bytes > maxBytes) {
         await reader.cancel();
         throw new ServiceError("请求内容过大。", 413, "INVALID_INPUT");
       }

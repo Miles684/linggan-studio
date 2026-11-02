@@ -424,6 +424,22 @@ h1 > span {
   gap: 12px;
   min-width: 145px;
 }
+.workflow-button {
+  border: 0;
+  background: transparent;
+  text-align: left;
+  padding: 4px 0;
+  font: inherit;
+  cursor: pointer;
+  border-radius: 6px;
+}
+.workflow-button:hover strong {
+  color: #486442;
+}
+.workflow-button:focus-visible {
+  outline: 2px solid #708663;
+  outline-offset: 6px;
+}
 .step-number {
   font-size: 12px;
   background: #e2e8da;
