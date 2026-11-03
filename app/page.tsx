@@ -120,6 +120,11 @@ const keyFields = [
     url: "https://bailian.console.aliyun.com/", link: "在百炼控制台管理千问密钥",
   },
   {
+    key: "arkKey", flag: "arkConfigured", id: "ark-key", label: "火山方舟 API Key",
+    description: "用于 Seedream 5.0 Flash / Pro 图片生成（北京地域）。接口地址：https://ark.cn-beijing.volces.com/api/v3/images/generations。请配置独立的方舟密钥。",
+    url: "https://ark.volcengine.com/region:cn-beijing/apikey", link: "前往火山方舟管理 API Key",
+  },
+  {
     key: "tikhubKey", flag: "tikhubConfigured", id: "tikhub-key", label: "TikHub API Key",
     description: "用于获取抖音、小红书的关键词搜索结果与作品详情。",
     url: "https://tikhub.io", link: "前往 TikHub 获取密钥",
@@ -130,6 +135,40 @@ const keyFields = [
     url: "https://bailian.console.aliyun.com/", link: "前往阿里云百炼控制台",
   },
 ] as const;
+type KeyConfiguration = Record<(typeof keyFields)[number]["flag"], boolean>;
+type LocalKeyStatus = { available: true; path: string; configured: KeyConfiguration };
+function keyConfiguration(value: unknown): KeyConfiguration {
+  const source = value && typeof value === "object" ? value as Record<string, unknown> : {};
+  return {
+    tikhubConfigured: source.tikhubConfigured === true,
+    dashscopeConfigured: source.dashscopeConfigured === true,
+    qwenConfigured: source.qwenConfigured === true,
+    arkConfigured: source.arkConfigured === true,
+  };
+}
+function mergeKeyConfiguration(first: KeyConfiguration, second: KeyConfiguration): KeyConfiguration {
+  return {
+    tikhubConfigured: first.tikhubConfigured || second.tikhubConfigured,
+    dashscopeConfigured: first.dashscopeConfigured || second.dashscopeConfigured,
+    qwenConfigured: first.qwenConfigured || second.qwenConfigured,
+    arkConfigured: first.arkConfigured || second.arkConfigured,
+  };
+}
+function parseLocalKeyStatus(value: unknown): LocalKeyStatus {
+  if (!value || typeof value !== "object") throw new Error("Invalid local key status");
+  const status = value as Record<string, unknown>;
+  if (status.available !== true || typeof status.path !== "string" || !status.path ||
+      !status.configured || typeof status.configured !== "object" ||
+      !keyFields.every(({ flag }) => typeof (status.configured as Record<string, unknown>)[flag] === "boolean"))
+    throw new Error("Invalid local key status");
+  return { available: true, path: status.path, configured: keyConfiguration(status.configured) };
+}
+async function readLocalKeyStatus(signal?: AbortSignal): Promise<LocalKeyStatus | null> {
+  const response = await fetch("/api/local-keys", { cache: "no-store", signal });
+  if (response.status === 404) return null;
+  if (!response.ok) throw new Error("Local key status unavailable");
+  return parseLocalKeyStatus(await response.json());
+}
 const number = (value: number | null | undefined) =>
   value == null
     ? "未提供"
@@ -206,8 +245,15 @@ export default function Home() {
       tikhubConfigured: false,
       dashscopeConfigured: false,
       qwenConfigured: false,
+      arkConfigured: false,
     }),
     [mobileMenu, setMobileMenu] = useState(false);
+  const [localKeys, setLocalKeys] = useState<LocalKeyStatus | null>(null);
+  const [localKeysLoading, setLocalKeysLoading] = useState(true);
+  const [localKeysError, setLocalKeysError] = useState("");
+  const [keySaveError, setKeySaveError] = useState("");
+  const [savingKeys, setSavingKeys] = useState(false);
+  const keySaveLock = useRef(false);
   const generation = useRef<Record<Platform, number>>({ douyin: 0, xiaohongshu: 0 }),
     control = useRef<Partial<Record<Platform, AbortController>>>({}),
     savedRef = useRef<Record<string, ContentItem>>({}),
@@ -219,6 +265,7 @@ export default function Home() {
     tikhubReady = !!credentials.tikhubKey || config.tikhubConfigured,
     dashscopeReady = !!credentials.dashscopeKey || config.dashscopeConfigured,
     qwenReady = !!credentials.qwenKey || config.qwenConfigured || dashscopeReady,
+    arkReady = !!credentials.arkKey || config.arkConfigured,
     shown = filter === "saved" ? items.filter((x) => !!saved[noteId(x)]) : items,
     activeJobs = items.filter(
       (x) =>
@@ -228,6 +275,10 @@ export default function Home() {
   const creationKeys = useMemo(
     () => ({ qwenKey: credentials.qwenKey, dashscopeKey: credentials.qwenKey || config.qwenConfigured ? undefined : credentials.dashscopeKey }),
     [credentials.qwenKey, credentials.dashscopeKey, config.qwenConfigured],
+  );
+  const imageCreationKeys = useMemo(
+    () => ({ ...creationKeys, arkKey: credentials.arkKey }),
+    [creationKeys, credentials.arkKey],
   );
   useEffect(() => {
     if (page !== "作品库") return;
@@ -294,21 +345,31 @@ export default function Home() {
       if (Array.isArray(r))
         setRecent(r.filter((x) => typeof x === "string").slice(0, 5));
     } catch {}
-    fetch("/api/config", { cache: "no-store" })
-      .then((r) => (r.ok ? r.json() : null))
-      .then((d) => {
-        if (d && typeof d === "object") {
-          const values = d as Record<string, unknown>;
-          setConfig({
-            tikhubConfigured: values.tikhubConfigured === true,
-            dashscopeConfigured: values.dashscopeConfigured === true,
-            qwenConfigured: values.qwenConfigured === true,
-          });
-        }
-      })
-      .catch(() => {});
+    const statusController = new AbortController();
+    let active = true;
+    Promise.allSettled([
+      fetch("/api/config", { cache: "no-store", signal: statusController.signal })
+        .then((response) => response.ok ? response.json() : null),
+      readLocalKeyStatus(statusController.signal),
+    ]).then(([serviceResult, localResult]) => {
+      if (!active) return;
+      const serverConfig = keyConfiguration(serviceResult.status === "fulfilled" ? serviceResult.value : null);
+      if (localResult.status === "fulfilled") {
+        setLocalKeys(localResult.value);
+        setLocalKeysError("");
+        setConfig(mergeKeyConfiguration(serverConfig, localResult.value?.configured || keyConfiguration(null)));
+      } else {
+        setConfig(serverConfig);
+        setLocalKeysError("无法读取本机密钥配置状态，请重试后再应用配置。输入内容会保留。");
+      }
+      setLocalKeysLoading(false);
+    });
     const controllers = control.current;
-    return () => Object.values(controllers).forEach((controller) => controller.abort());
+    return () => {
+      active = false;
+      statusController.abort();
+      Object.values(controllers).forEach((controller) => controller.abort());
+    };
   }, []);
   useEffect(() => {
     if (!toast) return;
@@ -332,6 +393,58 @@ export default function Home() {
       document.body.style.overflow = "";
     };
   }, [selectedId, lightbox]);
+  async function retryLocalKeys() {
+    if (localKeysLoading || savingKeys) return;
+    setLocalKeysLoading(true);
+    setLocalKeysError("");
+    try {
+      const status = await readLocalKeyStatus();
+      setLocalKeys(status);
+      if (status) setConfig((current) => mergeKeyConfiguration(current, status.configured));
+    } catch {
+      setLocalKeysError("无法读取本机密钥配置状态，请重试后再应用配置。输入内容会保留。");
+    } finally {
+      setLocalKeysLoading(false);
+    }
+  }
+  async function applyKeyConfiguration() {
+    if (keySaveLock.current || localKeysLoading || localKeysError) return;
+    keySaveLock.current = true;
+    setSavingKeys(true);
+    setKeySaveError("");
+    const nextKeys: Credentials = Object.fromEntries(
+      keyFields.map(({ key }) => [key, draftKeys[key]?.trim() || ""])
+        .filter(([, value]) => value),
+    );
+    try {
+      if (localKeys) {
+        const response = await fetch("/api/local-keys", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ credentials: nextKeys }),
+        });
+        if (!response.ok) throw new Error("Local key save failed");
+        const savedStatus = parseLocalKeyStatus(await response.json());
+        setLocalKeys(savedStatus);
+        setConfig((current) => mergeKeyConfiguration(current, savedStatus.configured));
+        setCredentials({});
+        setDraftKeys({});
+        setToast("密钥已保存到本机，后续版本会自动读取。");
+      } else {
+        setCredentials(nextKeys);
+        setToast("密钥已应用到本次会话。");
+      }
+      cancel("douyin");
+      cancel("xiaohongshu");
+      updateCollection("douyin", { error: "" });
+      updateCollection("xiaohongshu", { error: "" });
+    } catch {
+      setKeySaveError("未能确认密钥已保存到本机，输入内容已保留。请检查本机服务后重试。");
+    } finally {
+      keySaveLock.current = false;
+      setSavingKeys(false);
+    }
+  }
   function persistSaved(next: Record<string, ContentItem>) {
     savedRef.current = next;
     setSaved(next);
@@ -1182,8 +1295,9 @@ export default function Home() {
                       sources={xhsSources}
                       productImages={productImages.filter((image) => image.platform === "xiaohongshu")}
                       savedWorks={Object.values(saved).filter((item) => item.platform === "xiaohongshu")}
-                      credentials={creationKeys}
+                      credentials={imageCreationKeys}
                       configured={qwenReady}
+                      arkConfigured={arkReady}
                       initialSource={xhsSource}
                       launchId={xhsLaunchId}
                       onCopy={copyCreationText}
@@ -1452,7 +1566,7 @@ export default function Home() {
                 <div>
                   <div className="eyebrow">WORKSPACE SETTINGS</div>
                   <h1>API 密钥管理</h1>
-                  <p>管理千问创作、热点采集和语音转写使用的密钥。</p>
+                  <p>管理千问创作、火山方舟生图、热点采集和语音转写使用的密钥。</p>
                 </div>
                 <button
                   className="subtle-button"
@@ -1470,27 +1584,38 @@ export default function Home() {
                     </span>
                     <div>
                       <h2>API 服务配置</h2>
-                      <p>密钥仅保留在当前页面内存中，刷新后需要重新填写。</p>
+                      <p>{localKeys
+                        ? "点击应用配置后保存到本机共享文件，刷新或更换项目版本后自动读取。留空会保留已保存的密钥。"
+                        : localKeysLoading ? "正在读取本机密钥配置状态…"
+                        : localKeysError ? "本机配置状态尚未确认，暂不应用新的密钥。"
+                        : "当前为远程会话，密钥仅保留在当前页面内存中，刷新后需要重新填写。"}</p>
                     </div>
                   </div>
+                  {localKeys && (
+                    <div className="setting-field">
+                      <div><strong>本机共享配置文件</strong></div>
+                      <p style={{ overflowWrap: "anywhere" }}>{localKeys.path}</p>
+                      <p>各版本使用同一路径；页面仅显示配置状态，不读取或展示已保存的密钥。</p>
+                    </div>
+                  )}
+                  {localKeysError && (
+                    <div className="notice error-notice" role="alert">
+                      <p>{localKeysError}</p>
+                      <button type="button" className="subtle-button" disabled={localKeysLoading || savingKeys}
+                        onClick={() => void retryLocalKeys()}>重试读取</button>
+                    </div>
+                  )}
+                  {keySaveError && <p className="notice error-notice" role="alert">{keySaveError}</p>}
                   <form
                     onSubmit={(e) => {
                       e.preventDefault();
-                      cancel("douyin");
-                      cancel("xiaohongshu");
-                      setCredentials({
-                        tikhubKey: draftKeys.tikhubKey?.trim(),
-                        dashscopeKey: draftKeys.dashscopeKey?.trim(),
-                        qwenKey: draftKeys.qwenKey?.trim(),
-                      });
-                      setToast("密钥已应用到本次会话。");
-                      updateCollection("douyin", { error: "" });
-                      updateCollection("xiaohongshu", { error: "" });
+                      void applyKeyConfiguration();
                     }}
                   >
                     {keyFields.map(({ key, flag, id, label, description, url, link }) => {
                       const fallback = key === "qwenKey" && dashscopeReady;
                       const status = credentials[key] ? "本次会话已配置"
+                        : localKeys?.configured[flag] ? "本机已保存"
                         : config[flag] ? "服务器已配置"
                         : fallback ? "使用百炼密钥" : "待配置";
                       return (
@@ -1503,6 +1628,7 @@ export default function Home() {
                           <input
                             id={id}
                             type="password"
+                            disabled={savingKeys}
                             autoComplete="off"
                             spellCheck={false}
                             maxLength={2048}
@@ -1511,8 +1637,9 @@ export default function Home() {
                             onChange={(event) => {
                               const value = event.target.value;
                               setDraftKeys((previous) => ({ ...previous, [key]: value }));
+                              setKeySaveError("");
                             }}
-                            placeholder={config[flag] ? "服务器已配置，可留空使用" : `输入 ${label}`}
+                            placeholder={localKeys?.configured[flag] ? "留空保留本机密钥" : config[flag] ? "服务器已配置，可留空使用" : `输入 ${label}`}
                           />
                           <a href={url} target="_blank" rel="noopener noreferrer">
                             {link} <ExternalLink size={12} />
@@ -1521,24 +1648,27 @@ export default function Home() {
                       );
                     })}
                     <div className="settings-actions">
-                      <button className="collect-button" type="submit">
-                        <Check size={16} />
-                        应用配置
+                      <button className="collect-button" type="submit" disabled={savingKeys || localKeysLoading || !!localKeysError}>
+                        {savingKeys ? <LoaderCircle size={16} className="spin" /> : <Check size={16} />}
+                        {savingKeys ? "正在保存…" : "应用配置"}
                       </button>
                       <button
                         type="button"
                         className="subtle-button"
+                        disabled={savingKeys}
                         onClick={() => {
                           cancel("douyin");
                           cancel("xiaohongshu");
                           setCredentials({});
                           setDraftKeys({});
-                          setToast("本次会话密钥已清除");
+                          setKeySaveError("");
+                          setToast(localKeys ? "会话密钥已清除，本机已保存的密钥不受影响。" : "本次会话密钥已清除");
                         }}
                       >
                         清除会话密钥
                       </button>
                     </div>
+                    {localKeys && <p className="hint">清除会话密钥只清空当前输入与内存，本机共享文件中的密钥不受影响。</p>}
                   </form>
                 </section>
                 <aside className="settings-guide">
@@ -1552,10 +1682,11 @@ export default function Home() {
                   <ol>
                     <li>开通 TikHub 并获取 API Key</li>
                     <li>在百炼开通所需的千问或语音识别模型</li>
+                    <li>使用 Seedream 时，在火山方舟开通对应模型并获取 API Key</li>
                     <li>填写所需密钥，点击“应用配置”</li>
                   </ol>
                   <p className="hint">
-                    采集和转写会按服务商规则产生用量。服务是否可用，以实际请求结果为准。
+                    采集、转写和创作会按服务商规则产生用量。服务是否可用，以实际请求结果为准。
                   </p>
                 </aside>
               </div>

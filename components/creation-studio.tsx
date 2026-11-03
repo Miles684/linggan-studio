@@ -27,6 +27,14 @@ import {
 import type { ContentItem, Credentials } from "../lib/types";
 import { readWorkImage, type LibraryImage, type WorkDraft } from "../lib/library";
 import { optimizedImageSize, type ImageResolution } from "../lib/image-size";
+import {
+  DEFAULT_IMAGE_MODEL,
+  IMAGE_MODELS,
+  getImageModel,
+  imageModelLabel,
+  type ImageModelId,
+  type ImageSubmissionResult,
+} from "../lib/image-models";
 import { countCharacters, noteFormatError } from "../lib/note-format";
 import "./creation-studio.css";
 
@@ -36,6 +44,7 @@ export type CreationStudioProps = {
   savedWorks: ContentItem[];
   credentials: Credentials;
   configured: boolean;
+  arkConfigured: boolean;
   onCopy: (text: string) => Promise<void> | void;
   onSaveImage: (blob: Blob, title: string) => Promise<void>;
   creatorName: string;
@@ -57,7 +66,7 @@ type ReferenceImage = {
 };
 type ImageTask = { taskId: string; model: string; createdAt: number };
 type ImageResult = { images: string[]; model: string };
-type ImageSubmission = { id: string; startedAt: number; error?: string };
+type ImageSubmission = { id: string; startedAt: number; model?: string; error?: string };
 type ImageSession = {
   submitting?: ImageSubmission;
   task?: ImageTask;
@@ -88,7 +97,7 @@ const MAX_REQUEST_BYTES = 8 * 1024 * 1024;
 const IMAGE_TYPES = ["image/jpeg", "image/png", "image/webp"];
 // A paid submission must outlive a particular panel instance. Only metadata
 // enters sessionStorage; credentials and image data remain in the request.
-let currentImageSubmission: { id: string; promise: Promise<ImageTask> } | null =
+let currentImageSubmission: { id: string; promise: Promise<ImageSession> } | null =
   null;
 let currentImageSession: ImageSession | null = null;
 
@@ -460,6 +469,7 @@ export function CreationStudio({
   savedWorks,
   credentials,
   configured: ready,
+  arkConfigured,
   onCopy,
   onSaveImage,
   creatorName,
@@ -469,6 +479,18 @@ export function CreationStudio({
   launchId,
 }: CreationStudioProps) {
   const [imageMode, setImageMode] = useState<ImageMode>("optimize");
+  const [imageModel, setImageModel] = useState<ImageModelId>(DEFAULT_IMAGE_MODEL);
+  const imageProvider = getImageModel(imageModel)?.provider ?? "qwen";
+  const imageReady = imageProvider === "ark" ? arkConfigured : ready;
+  const imageProviderName = imageProvider === "ark" ? "火山方舟" : "百炼千问";
+  const qwenCredentials = useMemo(() => ({
+    qwenKey: credentials.qwenKey,
+    dashscopeKey: credentials.dashscopeKey,
+  }), [credentials.qwenKey, credentials.dashscopeKey]);
+  const imageCredentials = useMemo(() => imageProvider === "ark"
+    ? { arkKey: credentials.arkKey }
+    : qwenCredentials,
+  [imageProvider, credentials.arkKey, qwenCredentials]);
   const optimizing = imageMode === "optimize";
   const [productImage, setProductImage] = useState<ReferenceImage | null>(null);
   const [prompt, setPrompt] = useState("");
@@ -501,6 +523,8 @@ export function CreationStudio({
   const [pendingSubmission, setPendingSubmission] = useState<
     (ImageSubmission & { active: boolean }) | null
   >(null);
+  const submittingToArk = getImageModel(pendingSubmission?.model)?.provider === "ark";
+  const submissionConsoleName = submittingToArk ? "火山方舟" : "百炼";
   const [imageResult, setImageResult] = useState<ImageResult | null>(null);
   const [pollVersion, setPollVersion] = useState(0);
   const [paused, setPaused] = useState(false);
@@ -560,12 +584,13 @@ export function CreationStudio({
       new TextEncoder().encode(
         JSON.stringify({
           mode: "reference",
+          model: imageModel,
           images: references.filter(Boolean).map((item) => item!.data),
           size,
-          credentials,
+          credentials: imageCredentials,
         }),
       ).length,
-    [references, size, credentials],
+    [references, size, imageModel, imageCredentials],
   );
 
   useEffect(() => {
@@ -591,6 +616,8 @@ export function CreationStudio({
         saved.result.images.every(imageUrl)
           ? saved.result
           : null;
+      const restoredModel = getImageModel(submission?.model || task?.model || result?.model);
+      if (restoredModel) setImageModel(restoredModel.id);
       setImageResult(result);
       if (submission) {
         const active = currentImageSubmission?.id === submission.id;
@@ -670,7 +697,7 @@ export function CreationStudio({
             model?: string;
           }>(
             "/api/create/image/status",
-            { taskId: imageTask!.taskId, credentials },
+            { taskId: imageTask!.taskId, credentials: qwenCredentials },
             controller.signal,
           );
           if (controller.signal.aborted || !alive.current) return;
@@ -717,7 +744,7 @@ export function CreationStudio({
     }
     void poll();
     return () => controller.abort();
-  }, [imageTask, pollVersion, paused, ready, credentials]);
+  }, [imageTask, pollVersion, paused, ready, qwenCredentials]);
 
   function updateReferences(next: (ReferenceImage | null)[]) {
     const normalized = normalizeSlots(next);
@@ -745,9 +772,10 @@ export function CreationStudio({
       const bytes = new TextEncoder().encode(
         JSON.stringify({
           mode: "reference",
+          model: imageModel,
           images: next.filter(Boolean).map((item) => item!.data),
           size,
-          credentials,
+          credentials: imageCredentials,
         }),
       ).length;
       if (bytes > MAX_REQUEST_BYTES)
@@ -795,7 +823,7 @@ export function CreationStudio({
       window.dispatchEvent(new Event(TASK_EVENT));
       return;
     }
-    if (!ready || imageSubmitLock.current || imageWorking || processingRef.current)
+    if (!imageReady || imageSubmitLock.current || imageWorking || processingRef.current)
       return;
     setImageError("");
     setImageNotice("");
@@ -827,18 +855,20 @@ export function CreationStudio({
       optimizing && productImage
         ? {
             mode: "optimize",
+            model: imageModel,
             images: [productImage.data],
             prompt: prompt.trim(),
             resolution,
             originalWidth: productImage.originalWidth,
             originalHeight: productImage.originalHeight,
-            credentials,
+            credentials: imageCredentials,
           }
         : {
             mode: imageMode,
+            model: imageModel,
             images: references.filter(Boolean).map((item) => item!.data),
             size,
-            credentials,
+            credentials: imageCredentials,
           };
     if (
       new TextEncoder().encode(JSON.stringify(payload)).length >
@@ -850,31 +880,38 @@ export function CreationStudio({
     const submission: ImageSubmission = {
       id: crypto.randomUUID(),
       startedAt: Date.now(),
+      model: imageModel,
     };
     imageSubmitLock.current = true;
     // Defer fetch until the cross-mount lock and session marker both exist.
-    const promise = Promise.resolve().then(async () => {
-      const value = await post<{
-        taskId: string;
-        status: string;
-        model: string;
-      }>("/api/create/image", payload);
-      if (!value || typeof value.taskId !== "string" || !value.taskId)
+    const promise = Promise.resolve().then(async (): Promise<ImageSession> => {
+      const value = await post<ImageSubmissionResult>("/api/create/image", payload);
+      if (value?.status === "done") {
+        const images = Array.isArray(value.images) ? value.images.filter(imageUrl) : [];
+        if (!images.length)
+          throw new Error("服务未返回可用图片，生成结果暂时无法确认。请先在服务控制台核对。");
+        return { result: { images, model: value.model || imageModel } };
+      }
+      if (!value || value.status !== "pending" || typeof value.taskId !== "string" || !value.taskId)
         throw new Error("服务未返回生成任务编号，提交状态暂时无法确认。");
-      return {
+      return { task: {
         taskId: value.taskId,
-        model: value.model || "qwen-image-2.1-pro",
+        model: value.model || imageModel,
         createdAt: Date.now(),
-      };
+      } };
     });
     currentImageSubmission = { id: submission.id, promise };
     rememberImage({ submitting: submission });
     window.dispatchEvent(new Event(TASK_EVENT));
     try {
-      const task = await promise;
+      const completed = await promise;
       if (currentImageSubmission?.id !== submission.id) return;
       currentImageSubmission = null;
-      rememberImage({ task });
+      rememberImage(completed);
+      if (completed.result && alive.current) {
+        setSavedImages([]);
+        setImageNotice("图片已生成。你可以预览、下载，或保存到产品资料库。");
+      }
     } catch (error) {
       if (currentImageSubmission?.id !== submission.id) return;
       currentImageSubmission = null;
@@ -1007,7 +1044,7 @@ export function CreationStudio({
               draft: { title: copyResult.title, content: copyResult.content, tags: draftTags },
             },
           }),
-          credentials,
+          credentials: qwenCredentials,
         },
         controller.signal,
       );
@@ -1108,7 +1145,7 @@ export function CreationStudio({
     <div className="creation-studio">
       {!ready && (
         <p className="cs-connection" id="cs-qwen-unavailable" role="status">
-          千问服务尚未配置。在「设置」中配置千问后，即可生成图片和文案。
+          千问服务尚未配置。在「设置」中配置千问后，即可使用千问生图和文案创作。
         </p>
       )}
       <div className="cs-live-service">
@@ -1117,7 +1154,7 @@ export function CreationStudio({
           真实 AI 创作
         </span>
         <p>
-          本页会调用百炼千问服务并产生用量；即使选择演示笔记，生成也使用真实服务。
+          图片按所选模型调用百炼千问或火山方舟，文案使用千问；生成会产生相应服务用量。
         </p>
       </div>
       <div className="cs-workspaces">
@@ -1172,6 +1209,36 @@ export function CreationStudio({
             </button>
           </div>
           <div className="cs-form-body">
+            <div className="cs-field cs-model-field">
+              <label htmlFor="cs-image-model">生图模型</label>
+              <div className="cs-select-wrap">
+                <select
+                  id="cs-image-model"
+                  value={imageModel}
+                  disabled={imageWorking || processingIndex !== null}
+                  onChange={(event) => {
+                    const model = getImageModel(event.target.value);
+                    if (!model) return;
+                    setImageModel(model.id);
+                    setImageError("");
+                    setImageNotice("");
+                  }}
+                >
+                  {IMAGE_MODELS.map((model) => (
+                    <option key={model.id} value={model.id}>{model.label}</option>
+                  ))}
+                </select>
+                <ChevronDown size={16} />
+              </div>
+              <p className="cs-model-caption">
+                图片优化与图生图共用此选择 · {imageProviderName}
+              </p>
+              {!imageReady && (
+                <p className="cs-message cs-warning" id="cs-image-unavailable" role="status">
+                  {imageProviderName}尚未配置，请在「设置 → API 密钥管理」中填写并应用{imageProvider === "ark" ? "火山方舟" : "千问"}密钥。
+                </p>
+              )}
+            </div>
             <div className="cs-reference-area">
                 <div className="cs-reference-heading">
                   <div>
@@ -1181,7 +1248,7 @@ export function CreationStudio({
                     </h3>
                     <p>{optimizing
                       ? "上传一张效果图，重绘后保持原图比例。"
-                      : "图 1 是效果参考，其余图片是素材原图。"}</p>
+                      : "图 1 提供构图、场景、影调、色调、布光与景深；图 2 起提供主体，生成时要求保持主体形状结构、材质外观一致。"}</p>
                   </div>
                   <span className="cs-reference-count">{optimizing ? "单图重绘" : "至少 2 张"}</span>
                 </div>
@@ -1395,6 +1462,8 @@ export function CreationStudio({
                       <option value="1024*1024">1:1 · 方形</option>
                       <option value="768*1024">3:4 · 竖图</option>
                       <option value="1024*768">4:3 · 横图</option>
+                      <option value="832*1248">2:3 · 竖图</option>
+                      <option value="1248*832">3:2 · 横图</option>
                       <option value="1280*720">16:9 · 宽屏横图</option>
                       <option value="720*1280">9:16 · 全屏竖图</option>
                     </>
@@ -1427,24 +1496,26 @@ export function CreationStudio({
                   <div>
                     <strong>
                       {pendingSubmission.active
-                        ? "正在确认生成任务"
+                        ? submittingToArk ? "正在生成你的图片" : "正在确认生成任务"
                         : "上次提交状态未确认"}
                     </strong>
                     <p>
                       {pendingSubmission.active
-                        ? "请求已经提交，切换页面不会重复生成。请等待任务编号返回。"
-                        : "页面刷新或网络中断时，服务可能已创建任务并产生用量。请先在百炼控制台核对，再决定是否重新生成。"}
+                        ? submittingToArk
+                          ? "请求已经提交，切换页面不会重复生成。请保持页面打开，等待图片返回。"
+                          : "请求已经提交，切换页面不会重复生成。请等待任务编号返回。"
+                        : `页面刷新或网络中断时，服务可能已受理请求并产生用量。请先在${submissionConsoleName}控制台核对，再决定是否重新生成。`}
                     </p>
                   </div>
                 </div>
                 {!pendingSubmission.active && (
                   <div className="cs-unconfirmed-actions">
                     <a
-                      href="https://bailian.console.aliyun.com/"
+                      href={submittingToArk ? "https://console.volcengine.com/ark/" : "https://bailian.console.aliyun.com/"}
                       target="_blank"
                       rel="noopener noreferrer"
                     >
-                      前往百炼控制台核对 <ArrowRight size={14} />
+                      前往{submissionConsoleName}控制台核对 <ArrowRight size={14} />
                     </a>
                     <button
                       type="button"
@@ -1505,9 +1576,9 @@ export function CreationStudio({
                 className="cs-generate-button"
                 onClick={() => void generateImage()}
                 disabled={
-                  !ready || imageStatus === "submitting" || processingIndex !== null
+                  !imageReady || imageStatus === "submitting" || processingIndex !== null
                 }
-                aria-describedby={ready ? undefined : "cs-qwen-unavailable"}
+                aria-describedby={imageReady ? undefined : "cs-image-unavailable"}
               >
                 {imageStatus === "submitting" ? (
                   <LoaderCircle size={18} className="spin" />
@@ -1540,7 +1611,7 @@ export function CreationStudio({
               </button>
             )}
             <p className="cs-service-caption">
-              <span>AI 图片创作</span>
+              <span>{imageModelLabel(imageModel)}</span>
               <span>生成需要一些时间，请耐心等待</span>
             </p>
           </div>
@@ -1550,8 +1621,8 @@ export function CreationStudio({
               {imageResult && (
                 <span>
                   {imageWorking
-                    ? "上一次结果"
-                    : `${imageResult.images.length} 张 · 已生成`}
+                    ? `上一次结果 · ${imageModelLabel(imageResult.model)}`
+                    : `${imageResult.images.length} 张 · ${imageModelLabel(imageResult.model)}`}
                 </span>
               )}
             </div>

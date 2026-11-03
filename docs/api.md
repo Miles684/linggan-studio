@@ -45,12 +45,19 @@
 
 ## 安全边界与验证
 
-私有 Sites 访问控制保护服务器密钥；本版不应在配置共享服务器密钥后直接开放匿名访问。POST 拒绝跨站 Origin / Fetch-Site；仅 JSON、默认最多 16 KB 请求，图片生成单独允许 8 MB、文案生成允许 144 KB；转写地址限制为 HTTPS 抖音相关域名；生成结果地址限制为百炼 OSS 域名。出站响应有大小上限、超时、禁重定向，第三方错误经过脱敏。
+本机 `npm run dev` 通过开发中间件提供 `/api/local-keys`：GET 只返回文件路径和四项配置状态；POST 同源 JSON 的 `credentials` 非空字段增量写入用户目录 `LingganStudio/api-keys.json`。文件 schema 为 `{version:1,keys:{...}}`，仅允许现有四项密钥。文件创建和保存不会发生在项目目录，损坏文件不会被覆盖。
+
+每次本机 API 请求都从文件读取密钥。中间件清除外来桥接头，只有环回地址、本机 Host、合法来源的请求才注入带随机启动令牌的内部头；Worker 验证令牌后合并本机默认值，合法非空会话值优先。不向前端返回已保存密钥，生产构建无桥接令牌。图片下载等无关路由不会合并凭据。
+
+私有 Sites 访问控制保护服务器密钥；本版不应在配置共享服务器密钥后直接开放匿名访问。POST 拒绝跨站 Origin / Fetch-Site；仅 JSON、默认最多 16 KB 请求，图片生成单独允许 8 MB、文案生成允许 144 KB；转写地址限制为 HTTPS 抖音相关域名；生成结果地址限制为百炼 OSS 或方舟专用输出桶域名。出站响应有大小上限、超时、禁重定向，第三方错误经过脱敏。
 
 ## 小红书内容创作
 
-- 图片使用 `qwen-image-2.1-pro`。图片优化接收一张产品效果图、重绘提示词、原图宽高和 1K 或 2K 分辨率。服务端核对图片比例后按原比例计算输出尺寸。图生图使用固定提示词，接收 2–10 张参考图，支持 1:1、3:4、4:3、16:9 和 9:16。两个模式均支持 JPEG、PNG 和 WebP，单张压缩后最多 1.5 MB，整次请求最多 8 MB。[官方图像生成与编辑 API](https://help.aliyun.com/zh/model-studio/qwen-image-generation-and-editing-api-reference)
+- 图片使用 `qwen-image-2.1-pro`。图片优化接收一张产品效果图、重绘提示词、原图宽高和 1K 或 2K 分辨率。服务端核对图片比例后按原比例计算输出尺寸。图生图使用固定提示词，接收 2–10 张参考图，支持 1:1、3:4、4:3、2:3、3:2、16:9 和 9:16。新增 2:3 / 3:2 分别使用 832×1248 / 1248×832，适用于全部三个生图模型。两个模式均支持 JPEG、PNG 和 WebP，单张压缩后最多 1.5 MB，整次请求最多 8 MB。[官方图像生成与编辑 API](https://help.aliyun.com/zh/model-studio/qwen-image-generation-and-editing-api-reference)
 - 图片提交 `POST /api/v1/services/aigc/image-generation/generation`，使用 `X-DashScope-Async: enable`；状态通过 `GET /api/v1/tasks/{taskId}` 查询。客户端保存任务编号，暂停或刷新后继续查询相同任务，不自动重新提交生成。成功从 `output.choices[].message.content[].image` 取得结果；生成 URL 通常有效 24 小时，存入资料库时会下载实际文件。[2.1 Pro 模型信息](https://help.aliyun.com/zh/model-studio/qwen-image-2-1-pro)
+- 图片请求的 `model` 还支持 `doubao-seedream-5-0-flash-260915`、`doubao-seedream-5-0-pro-260628`；省略时保持千问默认值。两种 Seedream 均使用火山方舟北京地域 `POST https://ark.cn-beijing.volces.com/api/v3/images/generations`，仅发送独立 `arkKey` / `ARK_API_KEY`，不回退到百炼或千问密钥。设置页可配置会话密钥，服务器配置仅返回是否已配置。[官方模型说明](https://docs.volcengine.com/docs/ark/seedream-5-0-pro?lang=zh)
+- Seedream 接收按原顺序排列的 `image` 数组与原始创作提示词，使用 `response_format:url`、PNG 输出，单次等待最多 180 秒；成功直接返回 `{status:"done",images,model}`，无需任务轮询。超时或连接中断时保留未确认状态，不自动重提。参考图须能解码且宽高至少 15 像素；3:4 / 4:3 输出适配为 864×1152 / 1152×864，其余画幅保持原比例，图片优化保留 1K / 2K 与原图比例。[官方图片 API](https://console.volcengine.com/ark/region:cn-beijing/docs/image-generation-api)
+- Seedream 预览和下载共用输出域名校验，同时接受官方北京图片桶 `ark-content-generation-v2-cn-beijing.tos-cn-beijing.volces.com` 和共用 AIGC 桶 `ark-acg-cn-beijing.tos-cn-beijing.volces.com`；保留原始 URL 签名参数。下载时检查图片类型、文件头和大小，不附带服务密钥，不接受任意 TOS 桶或跳转。[官方输出源站列表](https://docs.byteplus.com/en/docs/iga/ai_acceleration_overview_en-us)
 - 文案使用 `qwen-plus` 的非思考 JSON 模式，服务端固定语气、真实性规则和输出结构。输入的原稿和用户要求作为 JSON 数据发送，不能改写系统消息。`idea` 模式根据想法创作，`rewrite` 模式根据原稿重新组织，原作者的经历不当作创作者本人经历；未提供真实体验时返回单独提醒，并检查明显的已发生亲历声明。命中检查时拒绝该次结果，不自动重新调用收费服务；此检查不能代替人工事实核对。输出标题最多 20 个可见字符，含 1 个表情；正文每 30–40 个字符配 1 个表情，另附 5 个不同的相关热门标签。修订时附上原来的创作资料、当前草稿及修改意见，仍经过相同的事实与格式检查。[结构化输出](https://help.aliyun.com/en/model-studio/qwen-structured-output)
 
 运行 `node --test tests/api.test.mjs tests/workerd-services.test.mjs`。测试覆盖 V2 数据结构、未知统计、Top10去重排序、分页、详情失败、HTTP 200 内业务失败、鉴权错误、异步 ASR 全流程、纠错失败保留原文、URL限制和跨站请求校验；测试使用注入的假响应，不访问真实供应商。

@@ -136,6 +136,16 @@
   margin-bottom: 22px;
   min-width: 0;
 }
+.cs-model-caption {
+  margin-top: 8px;
+  color: var(--cs-text);
+  font-size: 12px;
+  line-height: 1.8;
+}
+.cs-model-field .cs-message {
+  margin-top: 10px;
+  margin-bottom: 0;
+}
 .cs-field > label {
   display: flex;
   align-items: center;
@@ -285,6 +295,7 @@
 }
 .cs-output-heading {
   display: flex;
+  flex-wrap: wrap;
   justify-content: space-between;
   align-items: center;
   gap: 12px;

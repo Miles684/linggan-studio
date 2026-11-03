@@ -1,4 +1,5 @@
 import { env } from "cloudflare:workers";
+import { Buffer } from "node:buffer";
 import type { Credentials } from "../types";
 import { ServiceError } from "./services";
 
@@ -6,6 +7,7 @@ const services = {
   tikhub: { field: "tikhubKey", env: "TIKHUB_API_KEY", label: "TikHub" },
   dashscope: { field: "dashscopeKey", env: "DASHSCOPE_API_KEY", label: "阿里云百炼（北京地域）" },
   qwen: { field: "qwenKey", env: "QWEN_API_KEY", label: "通义千问（北京地域）" },
+  ark: { field: "arkKey", env: "ARK_API_KEY", label: "火山方舟（北京地域）" },
 } as const;
 type Service = keyof typeof services;
 type Environment = Partial<Record<(typeof services)[Service]["env"], string>>;
@@ -15,11 +17,31 @@ function serverKey(name: keyof Environment): string {
   return worker[name]?.trim() || process.env[name]?.trim() || "";
 }
 
-export function configuration() {
+function localCredentials(request?: Request): Credentials {
+  const token = (env as unknown as { LINGGAN_LOCAL_KEY_BRIDGE_TOKEN?: string }).LINGGAN_LOCAL_KEY_BRIDGE_TOKEN;
+  const header = request?.headers.get("x-linggan-local-keys");
+  // Only the local dev proxy receives this random, per-startup token. Deployed
+  // workers have no bridge token and ignore all client-supplied bridge headers.
+  if (!token || !header || header.length > 16000) return {};
+  try {
+    const data = JSON.parse(Buffer.from(header, "base64url").toString("utf8"));
+    if (data?.token !== token || !data.credentials || typeof data.credentials !== "object" || Array.isArray(data.credentials)) return {};
+    const keys: Credentials = {};
+    for (const { field } of Object.values(services)) {
+      const value = data.credentials[field];
+      if (typeof value === "string" && value.length <= 2048 && !/[\r\n]/.test(value)) keys[field] = value.trim();
+    }
+    return keys;
+  } catch { return {}; }
+}
+
+export function configuration(request?: Request) {
+  const local = localCredentials(request);
   return {
-    tikhubConfigured: !!serverKey("TIKHUB_API_KEY"),
-    dashscopeConfigured: !!serverKey("DASHSCOPE_API_KEY"),
-    qwenConfigured: !!serverKey("QWEN_API_KEY"),
+    tikhubConfigured: !!local.tikhubKey || !!serverKey("TIKHUB_API_KEY"),
+    dashscopeConfigured: !!local.dashscopeKey || !!serverKey("DASHSCOPE_API_KEY"),
+    qwenConfigured: !!local.qwenKey || !!serverKey("QWEN_API_KEY"),
+    arkConfigured: !!local.arkKey || !!serverKey("ARK_API_KEY"),
   };
 }
 
@@ -105,7 +127,24 @@ export async function readBody(
   }
   if (!body || typeof body !== "object" || Array.isArray(body))
     throw new ServiceError("请求内容无效。", 400, "INVALID_INPUT");
-  return body as Record<string, unknown>;
+  const result = body as Record<string, unknown>;
+  if (["/api/collect", "/api/transcribe", "/api/transcribe/status", "/api/create/image",
+    "/api/create/image/status", "/api/create/copy", "/api/create/douyin", "/api/support"].includes(new URL(request.url).pathname)) {
+    const local = localCredentials(request);
+    if (Object.keys(local).length) {
+      const supplied = result.credentials;
+      if (supplied !== undefined && (!supplied || typeof supplied !== "object" || Array.isArray(supplied)))
+        throw new ServiceError("接口配置格式无效。", 400, "INVALID_INPUT");
+      const merged = { ...(supplied as Credentials | undefined) };
+      for (const { field } of Object.values(services)) {
+        const value = merged[field];
+        // Retain malformed explicit values so resolveKey still rejects them.
+        if (value === undefined || (typeof value === "string" && value.length <= 2048 && !/[\r\n]/.test(value) && !value.trim())) merged[field] = local[field];
+      }
+      result.credentials = merged;
+    }
+  }
+  return result;
 }
 
 export function json(value: unknown, status = 200) {

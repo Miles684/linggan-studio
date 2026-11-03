@@ -31,6 +31,9 @@ yarn-error.log*
 !.env.example
 .dev.vars*
 *.pem
+api-keys.json
+.api-keys-*.tmp
+.api-keys.lock
 
 # Checkout-local tool state
 /.wrangler/

@@ -117,8 +117,8 @@ test("optimization uses source proportions and scales the pixel budget for each 
   }
 });
 
-test("reference creation forwards both new widescreen aspect ratios", async () => {
-  for (const size of ["1280*720", "720*1280"]) {
+test("reference creation forwards portrait, landscape and widescreen aspect ratios", async () => {
+  for (const size of ["832*1248", "1248*832", "1280*720", "720*1280"]) {
     await submitImage({ ...refRequest([png, png]), size }, KEY, async (_url, init) => {
       assert.equal(JSON.parse(init.body).parameters.size, size);
       return queued();
@@ -144,10 +144,6 @@ test("ten references preserve original order and use exact server-owned prompt",
     assert.deepEqual(content[10], { text: REFERENCE_IMAGE_PROMPT });
     assert.equal(content.length, 11);
     assert.equal(body.parameters.prompt_extend, false);
-    assert.equal(
-      REFERENCE_IMAGE_PROMPT,
-      "参考图一为产品效果图，参考图二、参考图三、参考图四...为素材原图，我希望素材原图完整复刻效果图的构图、影调、色调、光影、以及景深，生成全新的产品图，并且素材原图中的产品必须严格保持原有的形状结构、材质表现。",
-    );
     return queued();
   });
 });

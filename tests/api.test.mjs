@@ -72,6 +72,35 @@ test("dedicated Qwen keys take priority and only Qwen can fall back to an ASR ke
     });
   }
 });
+test("Ark credentials stay independent, prefer the session key and expose only configuration status", () => {
+  const envNames = ["ARK_API_KEY", "QWEN_API_KEY", "DASHSCOPE_API_KEY"];
+  const original = envNames.map((name) => process.env[name]);
+  try {
+    process.env.ARK_API_KEY = "server-ark";
+    process.env.QWEN_API_KEY = "server-qwen";
+    process.env.DASHSCOPE_API_KEY = "server-asr";
+    assert.equal(configuration().arkConfigured, true);
+    assert.ok(Object.values(configuration()).every((value) => typeof value === "boolean"));
+    assert.equal(resolveKey({ arkKey: " session-ark " }, "ark"), "session-ark");
+    assert.equal(resolveKey({ arkKey: "" }, "ark"), "server-ark");
+    assert.equal(resolveKey({ qwenKey: "session-qwen", dashscopeKey: "session-asr" }, "ark"), "server-ark");
+    for (const arkKey of ["key\n", "key\r", "x".repeat(2049), 42]) {
+      assert.throws(() => resolveKey({ arkKey }, "ark"), { code: "INVALID_INPUT" });
+    }
+    delete process.env.ARK_API_KEY;
+    assert.equal(configuration().arkConfigured, false);
+    assert.throws(() => resolveKey({ qwenKey: "session-qwen", dashscopeKey: "session-asr" }, "ark"), { code: "MISSING_CREDENTIALS" });
+    delete process.env.QWEN_API_KEY;
+    delete process.env.DASHSCOPE_API_KEY;
+    assert.throws(() => resolveKey({ arkKey: "session-ark" }, "qwen"), { code: "MISSING_CREDENTIALS" });
+  } finally {
+    envNames.forEach((name, i) => {
+      if (original[i] === undefined) delete process.env[name];
+      else process.env[name] = original[i];
+    });
+  }
+});
+
 test("creation body allowances are isolated to the two large-input routes", async () => {
   const data = JSON.stringify({ content: "字".repeat(30000) });
   for (const path of ["/api/create/copy", "/api/create/image"]) {

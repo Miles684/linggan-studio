@@ -29,6 +29,15 @@ export function isGeneratedImageHost(host: string): boolean {
   );
 }
 
+/** Official Beijing image output buckets, including Ark's shared AIGC bucket.
+ * https://docs.byteplus.com/en/docs/iga/ai_acceleration_overview_en-us
+ * Keep generation and download validation aligned; never allow arbitrary TOS buckets.
+ */
+export function isArkImageHost(host: string): boolean {
+  return host === "ark-content-generation-v2-cn-beijing.tos-cn-beijing.volces.com" ||
+    host === "ark-acg-cn-beijing.tos-cn-beijing.volces.com";
+}
+
 export function validateImageUrl(raw: unknown): string {
   if (typeof raw !== "string" || raw.length > 8192)
     throw new ServiceError(
@@ -53,6 +62,7 @@ export function validateImageUrl(raw: unknown): string {
     url.port ||
     !(
       isGeneratedImageHost(url.hostname) ||
+      isArkImageHost(url.hostname) ||
       IMAGE_DOMAINS.some(
         (domain) =>
           url.hostname === domain || url.hostname.endsWith(`.${domain}`),
@@ -60,7 +70,7 @@ export function validateImageUrl(raw: unknown): string {
     )
   )
     throw new ServiceError(
-      "仅支持保存采集结果或千问生成的图片。",
+      "仅支持保存采集结果或本站支持的模型生成的图片。",
       400,
       "INVALID_IMAGE_URL",
     );

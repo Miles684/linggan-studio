@@ -5,6 +5,8 @@ import { readExecutionProfile } from "./scripts/execution-profile.mjs";
 import { configureToolEnvironment } from "./scripts/tool-environment.mjs";
 import { sites } from "./scripts/vite/sites-vite-plugin";
 import { connectorPreview } from "./scripts/vite/connector-preview-plugin.mjs";
+import { randomUUID } from "node:crypto";
+import { localApiKeysPlugin } from "./scripts/vite/local-api-keys-plugin.mjs";
 
 const SITE_CREATOR_PLACEHOLDER_DATABASE_ID =
   "00000000-0000-4000-8000-000000000000";
@@ -39,6 +41,8 @@ const localBindingConfig = {
 
 export default defineConfig(async ({ command }) => {
   configureToolEnvironment(process.cwd());
+  const localKeysEnabled = command === "serve" && !managedLinux;
+  const localKeyBridgeToken = localKeysEnabled ? randomUUID() : "";
 
   // Wrangler snapshots its log path while the Cloudflare plugin is imported.
   const { cloudflare } = await import("@cloudflare/vite-plugin");
@@ -53,6 +57,7 @@ export default defineConfig(async ({ command }) => {
         : {}),
     },
     plugins: [
+      localApiKeysPlugin({ enabled: localKeysEnabled, bridgeToken: localKeyBridgeToken }),
       vinext(),
       sites({ mockAuth: !managedLinux }),
       connectorPreview(),
@@ -61,6 +66,7 @@ export default defineConfig(async ({ command }) => {
         inspectorPort: false,
         config: {
           ...localBindingConfig,
+          ...(localKeysEnabled ? { vars: { LINGGAN_LOCAL_KEY_BRIDGE_TOKEN: localKeyBridgeToken } } : {}),
           ...(command === "serve"
             ? {
                 services: [

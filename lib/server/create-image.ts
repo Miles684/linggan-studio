@@ -1,18 +1,27 @@
 import { Buffer } from "node:buffer";
 import { imageSize } from "image-size";
 import { optimizedImageSize } from "../image-size";
+import { DEFAULT_IMAGE_MODEL, getImageModel, type ImageSubmissionResult } from "../image-models";
+import { generateArkImage } from "./ark-image";
 import { detectImageType, isGeneratedImageHost } from "./import-image";
 import { ServiceError } from "./services";
 
-export const IMAGE_MODEL = "qwen-image-2.1-pro";
-export const REFERENCE_IMAGE_PROMPT =
-  "参考图一为产品效果图，参考图二、参考图三、参考图四...为素材原图，我希望素材原图完整复刻效果图的构图、影调、色调、光影、以及景深，生成全新的产品图，并且素材原图中的产品必须严格保持原有的形状结构、材质表现。";
+export const IMAGE_MODEL = DEFAULT_IMAGE_MODEL;
+export const REFERENCE_IMAGE_PROMPT = `参考图 1 为效果参考图，参考图 2 至最后一张为素材参考图。以素材参考图中的主体为唯一主体来源，生成一张全新的效果图。效果参考图仅提供画面设计依据，不采用其中主体的形状结构、材质或外观特征。
+
+画面复刻：完整复刻效果参考图的构图、场景、影调、色调、布光、景深。对齐主体在画面中的位置与占比、拍摄角度、透视关系和留白；还原场景环境、背景及前后景层次；复刻明暗层次、对比度、整体色彩氛围、光源方向、光线软硬、阴影与高光，以及焦点位置和背景虚化程度。
+
+主体保真（最高优先级）：严格保证素材参考图中的主体形状结构不变、材质外观与原来一致。保持原有轮廓、长宽比例、部件数量、连接关系与细节结构；保持材质种类、表面纹理、固有色、图案、标识、透明度与光泽特性。不得拉伸、压缩、扭曲、重塑主体，不得增删部件、替换材质、擅自改色或用效果参考图中的主体替代素材主体。
+
+多图对应：多张素材参考图展示同一主体时，结合各视角补充其真实细节，不因同一主体的多张视角图而额外增加主体数量；展示不同主体时，各自保留原有形状结构和材质外观，不将不同主体的部件或材质拼接、混合。
+
+自然融合：让素材主体按效果参考图的构图置入场景，可调整摆放、拍摄视角及随环境产生的光照、投影和反射，但不得改变主体本身的结构、材质与固有外观。色调和布光复刻不得变成对主体的重新染色或材质替换。若画面复刻与主体保真冲突，以主体保真为准；按所选画幅适配背景和留白，不裁切主体的关键结构。最终呈现自然、真实、细节清晰的全新效果图。`;
 
 const BASE_URL = "https://dashscope.aliyuncs.com";
 const MAX_BODY_BYTES = 8 * 1024 * 1024;
 const MAX_REFERENCE_BYTES = 1.5 * 1024 * 1024;
 const MAX_RESPONSE_BYTES = 1024 * 1024;
-const SIZES = ["1024*1024", "768*1024", "1024*768", "1280*720", "720*1280"];
+const SIZES = ["1024*1024", "768*1024", "1024*768", "832*1248", "1248*832", "1280*720", "720*1280"];
 const TASK_ID =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 type Json = Record<string, unknown>;
@@ -26,6 +35,12 @@ function record(value: unknown): Json {
 
 function invalid(message: string, code = "INVALID_INPUT", status = 400): never {
   throw new ServiceError(message, status, code);
+}
+
+export function resolveImageModel(value: unknown) {
+  const model = getImageModel(value === undefined ? DEFAULT_IMAGE_MODEL : value);
+  if (!model) invalid("请选择支持的生图模型。");
+  return model;
 }
 
 function validateReference(value: unknown): string {
@@ -88,11 +103,12 @@ function validateSubmission(raw: unknown) {
   if (!raw || typeof raw !== "object" || Array.isArray(raw))
     invalid("图片创作请求无效。");
   const body = record(raw);
+  const model = resolveImageModel(body.model);
   if (body.mode !== "optimize" && body.mode !== "reference")
     invalid("请选择图片优化或图生图。");
   const fields = body.mode === "reference"
-    ? ["mode", "images", "credentials", "size"]
-    : ["mode", "images", "credentials", "prompt", "resolution", "originalWidth", "originalHeight"];
+    ? ["mode", "images", "credentials", "size", "model"]
+    : ["mode", "images", "credentials", "prompt", "resolution", "originalWidth", "originalHeight", "model"];
   if (Object.keys(body).some((key) => !fields.includes(key)))
     invalid("图片创作请求包含不支持的字段。");
 
@@ -122,6 +138,7 @@ function validateSubmission(raw: unknown) {
     )
       invalid("图生图需要 2 至 10 张图片，第一张为产品效果图。");
     return {
+      model,
       images: body.images.map(validateReference),
       prompt: REFERENCE_IMAGE_PROMPT,
       size: body.size,
@@ -168,6 +185,7 @@ function validateSubmission(raw: unknown) {
   )
     invalid("原图和上传图片的画幅不一致，请重新选择图片。");
   return {
+    model,
     images: [image],
     prompt: body.prompt.trim(),
     size: optimizedImageSize(originalWidth, originalHeight, body.resolution),
@@ -346,8 +364,10 @@ export async function submitImage(
   body: unknown,
   key: string,
   fetcher: Fetcher = fetch,
-) {
+): Promise<ImageSubmissionResult> {
   const input = validateSubmission(body);
+  if (input.model.provider === "ark")
+    return generateArkImage(input, key, fetcher);
   const payload = await imageRequest(
     "/api/v1/services/aigc/image-generation/generation",
     key,
